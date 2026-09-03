@@ -1,0 +1,31 @@
+spring:
+  application:
+    name: catalog-backend
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/catalog_placeholder}
+    username: ${DB_USERNAME:placeholder}
+    password: ${DB_PASSWORD:placeholder}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${PORT:8081}
+
+# Token partilhado que o dcbo-backend usa para autenticar chamadas de propagação
+internal:
+  sync:
+    token: ${CATALOG_SYNC_TOKEN:placeholder}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
