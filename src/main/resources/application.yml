@@ -19,6 +19,11 @@ spring:
 server:
   port: ${PORT:8081}
 
+# Origem(ns) permitida(s) a chamar /api/** (o site publico dc) — TASK-014 requisito 6
+app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+
 # Token partilhado que o dcbo-backend usa para autenticar chamadas de propagação
 internal:
   sync:
