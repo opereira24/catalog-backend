@@ -39,7 +39,9 @@ public class PublicCarController {
 	 * Lists cars, paginated and filtered, ordered disponível → reservado → vendido and, within each
 	 * group, most recently created first (requirement 1).
 	 *
-	 * @param page zero-based page index, defaults to 0
+	 * @param page zero-based page index, defaults to 0; out-of-range values (negative, or large
+	 *     enough to overflow the internal offset computation) are clamped instead of failing (see
+	 *     {@code CarQueryService#resolvePage})
 	 * @param size page size, defaults to 12, capped to 60
 	 * @param marca exact brand filter, optional
 	 * @param combustivel exact fuel-type filter, optional

@@ -305,4 +305,29 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 
 		assertThat(seenIds).hasSize(totalCars);
 	}
+
+	/**
+	 * Regression test for TASK-014 review r1, IMPORTANTE 2: an out-of-range {@code page} — negative,
+	 * or large enough that {@code page * size} would overflow the offset {@code int} — must never
+	 * surface as a 500. {@code CarQueryService#resolvePage} clamps it instead, the same way {@code
+	 * size} is already clamped (ASSUNÇÃO in {@code backlog/tasks/TASK-014.md}, {@code ## Notas}).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void outOfRangePageIsClampedInsteadOfFailingWith500() throws Exception {
+		carRepository.saveAndFlush(aCar().build());
+
+		mockMvc
+				.perform(get("/api/cars").param("page", "-1"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.page").value(0));
+
+		mockMvc
+				.perform(
+						get("/api/cars")
+								.param("page", String.valueOf(Integer.MAX_VALUE))
+								.param("size", "60"))
+				.andExpect(status().isOk());
+	}
 }

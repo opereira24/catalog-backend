@@ -82,14 +82,17 @@ public class CarQueryService {
 	 * vendido, then by creation date descending within each group (requirement 1).
 	 *
 	 * @param criteria the optional filters to apply
-	 * @param page zero-based page index requested by the caller
+	 * @param page zero-based page index requested by the caller; negative values and values large
+	 *     enough to overflow the offset computation are clamped by {@link #resolvePage(int, int)}
+	 *     instead of failing (fixed per TASK-014 review r1, IMPORTANTE 2)
 	 * @param size page size requested by the caller; capped to {@link #MAX_PAGE_SIZE} and defaulted
 	 *     to {@link #DEFAULT_PAGE_SIZE} when {@code null}
 	 * @return the requested page, mapped to {@link CarResponse}
 	 */
 	public PagedResponse<CarResponse> list(CarSearchCriteria criteria, int page, Integer size) {
 		int effectiveSize = resolvePageSize(size);
-		Pageable pageable = PageRequest.of(page, effectiveSize, DEFAULT_SORT);
+		int effectivePage = resolvePage(page, effectiveSize);
+		Pageable pageable = PageRequest.of(effectivePage, effectiveSize, DEFAULT_SORT);
 		Page<Car> result = carRepository.findAll(CarSpecifications.matching(criteria), pageable);
 		return PagedResponse.from(result.map(CarResponse::from));
 	}
@@ -137,5 +140,25 @@ public class CarQueryService {
 			return DEFAULT_PAGE_SIZE;
 		}
 		return Math.max(1, Math.min(requestedSize, MAX_PAGE_SIZE));
+	}
+
+	/**
+	 * Resolves the effective zero-based page index for {@code GET /api/cars}: a negative {@code
+	 * requestedPage} is clamped up to {@code 0}, and a {@code requestedPage} large enough that
+	 * {@code requestedPage * effectiveSize} would overflow {@code int} (the offset Spring Data
+	 * computes for the underlying query) is clamped down to the highest page whose offset still
+	 * fits — mirroring the existing {@link #resolvePageSize(Integer)} clamp rather than letting
+	 * either case reach the database and fail with an unmapped exception (fixed per TASK-014 review
+	 * r1, IMPORTANTE 2: {@code page=-1} and {@code page=2147483647} both used to produce a 500).
+	 *
+	 * @param requestedPage the caller-supplied {@code page} query parameter
+	 * @param effectiveSize the page size already resolved by {@link #resolvePageSize(Integer)}
+	 * @return the page index to actually use, always {@code >= 0} and never large enough to overflow
+	 *     the offset computation for {@code effectiveSize}
+	 */
+	private static int resolvePage(int requestedPage, int effectiveSize) {
+		int nonNegativePage = Math.max(0, requestedPage);
+		long highestSafePage = Integer.MAX_VALUE / (long) effectiveSize;
+		return (int) Math.min(nonNegativePage, highestSafePage);
 	}
 }
