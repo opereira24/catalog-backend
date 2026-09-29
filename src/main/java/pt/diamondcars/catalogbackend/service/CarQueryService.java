@@ -47,15 +47,24 @@ public class CarQueryService {
 	 * Fixed default ordering for {@code GET /api/cars}: available first, then reserved, then sold
 	 * (via a raw {@code CASE} expression — {@link JpaSort#unsafe} lets an ordinary property-based
 	 * {@link Sort} carry an arbitrary JPQL order-by expression), and within each group, most
-	 * recently created first. Spring Data only applies {@link Sort} to the content query of a
-	 * {@code findAll(Specification, Pageable)} call, never to its count query, so this never breaks
-	 * pagination totals.
+	 * recently created first, with {@code id} ascending as a final tiebreaker. Spring Data only
+	 * applies {@link Sort} to the content query of a {@code findAll(Specification, Pageable)} call,
+	 * never to its count query, so this never breaks pagination totals.
+	 *
+	 * <p>The {@code id} tiebreaker is not cosmetic: without it, this is not a total order — rows
+	 * that share the same status rank <em>and</em> the same {@code createdAt} (realistic after a
+	 * bulk sync/backfill inserted in one transaction, since {@code created_at} defaults to the
+	 * transaction start) can come back from Postgres in a different relative order between two
+	 * queries with different {@code OFFSET}s, which duplicates or omits cars while paginating (fixed
+	 * per TASK-014 review r1, IMPORTANTE 1). {@code id} is unique and immutable, so adding it last
+	 * makes the ordering deterministic regardless of how many rows tie on the first two keys.
 	 */
 	private static final Sort DEFAULT_SORT =
 			JpaSort.unsafe(
 							Sort.Direction.ASC,
 							"(CASE WHEN vendido = true THEN 2 WHEN reservado = true THEN 1 ELSE 0 END)")
-					.and(Sort.by(Sort.Direction.DESC, "createdAt"));
+					.and(Sort.by(Sort.Direction.DESC, "createdAt"))
+					.and(Sort.by(Sort.Direction.ASC, "id"));
 
 	private final CarRepository carRepository;
 
@@ -101,13 +110,14 @@ public class CarQueryService {
 
 	/**
 	 * Lists the highlighted, unsold cars shown on the site's homepage carousel, most recently
-	 * created first, never more than {@link #MAX_HIGHLIGHTS} (requirement 3).
+	 * created first with {@code id} ascending as a tiebreaker, never more than {@link
+	 * #MAX_HIGHLIGHTS} (requirement 3).
 	 *
 	 * @return at most {@link #MAX_HIGHLIGHTS} highlighted, unsold cars
 	 */
 	public List<CarResponse> highlights() {
 		return carRepository
-				.findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDesc(PageRequest.of(0, MAX_HIGHLIGHTS))
+				.findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDescIdAsc(PageRequest.of(0, MAX_HIGHLIGHTS))
 				.stream()
 				.map(CarResponse::from)
 				.toList();

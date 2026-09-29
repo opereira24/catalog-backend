@@ -34,15 +34,20 @@ public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificatio
 	List<Car> findByDestaqueTrueAndVendidoFalse();
 
 	/**
-	 * Lists cars flagged as highlighted and not yet sold, most recently created first, capped by
-	 * {@code pageable} — backs {@code GET /api/cars/highlights} (TASK-014 requirement 3), which
-	 * must never return more than 8 cars.
+	 * Lists cars flagged as highlighted and not yet sold, most recently created first with {@code
+	 * id} ascending as a tiebreaker, capped by {@code pageable} — backs {@code
+	 * GET /api/cars/highlights} (TASK-014 requirement 3), which must never return more than 8 cars.
+	 *
+	 * <p>The {@code id} tiebreaker makes which 8 cars get selected deterministic even when more
+	 * than 8 highlighted, unsold cars share the exact same {@code createdAt} (same rationale as
+	 * {@code CarQueryService#DEFAULT_SORT}; fixed per TASK-014 review r1, SUGESTÃO 1) — without it,
+	 * Postgres is free to pick a different subset of the tied rows on every call.
 	 *
 	 * @param pageable a pageable requesting at most the desired number of results (e.g. {@code
 	 *     PageRequest.of(0, 8)}); only its page size and offset are used, sorting is fixed to
-	 *     {@code createdAt} descending
+	 *     {@code createdAt} descending then {@code id} ascending
 	 * @return at most {@code pageable.getPageSize()} cars where {@code destaque = true} and {@code
 	 *     vendido = false}, most recently created first
 	 */
-	List<Car> findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDesc(Pageable pageable);
+	List<Car> findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDescIdAsc(Pageable pageable);
 }

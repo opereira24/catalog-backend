@@ -8,18 +8,25 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import pt.diamondcars.catalogbackend.domain.car.Car;
 import pt.diamondcars.catalogbackend.domain.car.CarImage;
 import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * End-to-end tests of {@link PublicCarController}, {@code CarQueryService} and {@link
@@ -32,6 +39,8 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired private MockMvc mockMvc;
 	@Autowired private CarRepository carRepository;
+	@Autowired private DataSource dataSource;
+	@Autowired private ObjectMapper objectMapper;
 
 	/**
 	 * Clears every car written by a previous test, so tests never influence each other on the
@@ -251,5 +260,49 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 				.andExpect(jsonPath("$.content[0].marca").value("Audi"));
 
 		assertThat(carRepository.count()).isEqualTo(2);
+	}
+
+	/**
+	 * Regression test for TASK-014 review r1, IMPORTANTE 1: with many cars sharing the exact same
+	 * {@code created_at} — forced here with a raw {@code UPDATE} via {@link JdbcTemplate}, since
+	 * {@code @CreationTimestamp} makes the column read-only through JPA, but realistic in
+	 * production after a bulk sync/backfill inserts many rows in one transaction (the column
+	 * defaults to the transaction start) — sweeping every page of {@code GET /api/cars} must see
+	 * each car exactly once. Before {@code CarQueryService#DEFAULT_SORT} gained an {@code id}
+	 * tiebreaker, tied rows could be reordered between the different {@code OFFSET} queries the
+	 * sweep issues, producing duplicates and omissions.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void paginationVisitsEveryCarExactlyOnceWhenManyShareTheSameCreatedAt() throws Exception {
+		int totalCars = 25;
+		for (int i = 0; i < totalCars; i++) {
+			carRepository.saveAndFlush(aCar().modelo("Tied " + i).build());
+		}
+		new JdbcTemplate(dataSource).update("UPDATE cars SET created_at = now()");
+
+		Set<String> seenIds = new HashSet<>();
+		int pageSize = 7;
+		int page = 0;
+		int totalPages = Integer.MAX_VALUE;
+		while (page < totalPages) {
+			MvcResult result =
+					mockMvc
+							.perform(
+									get("/api/cars")
+											.param("page", String.valueOf(page))
+											.param("size", String.valueOf(pageSize)))
+							.andExpect(status().isOk())
+							.andReturn();
+			JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+			totalPages = body.get("totalPages").asInt();
+			for (JsonNode carNode : body.get("content")) {
+				seenIds.add(carNode.get("id").asString());
+			}
+			page++;
+		}
+
+		assertThat(seenIds).hasSize(totalCars);
 	}
 }
