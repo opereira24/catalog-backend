@@ -8,7 +8,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -272,11 +274,18 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 	 * tiebreaker, tied rows could be reordered between the different {@code OFFSET} queries the
 	 * sweep issues, producing duplicates and omissions.
 	 *
+	 * <p>{@code totalCars} is deliberately 150, not a smaller round number: TASK-014 review r2
+	 * measured that with only 25 tied rows Postgres 16 (via Testcontainers) happens to return a
+	 * stable relative order across {@code OFFSET} queries regardless of the {@code id} tiebreaker,
+	 * so the test passed 3/3 even with the tiebreaker removed and did not actually protect against
+	 * the regression it targets. 150 was confirmed to fail deterministically (141/150 correct, 2/2
+	 * runs) without the tiebreaker and to pass with it.
+	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void paginationVisitsEveryCarExactlyOnceWhenManyShareTheSameCreatedAt() throws Exception {
-		int totalCars = 25;
+		int totalCars = 150;
 		for (int i = 0; i < totalCars; i++) {
 			carRepository.saveAndFlush(aCar().modelo("Tied " + i).build());
 		}
@@ -312,16 +321,36 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 	 * surface as a 500. {@code CarQueryService#resolvePage} clamps it instead, the same way {@code
 	 * size} is already clamped (ASSUNÇÃO in {@code backlog/tasks/TASK-014.md}, {@code ## Notas}).
 	 *
+	 * <p>More cars than the default {@code size} are inserted, and the ids returned for {@code
+	 * page=-1} are compared against the ids returned for {@code page=0} (TASK-014 review r2,
+	 * SUGESTÃO 1) — with only a single car, {@code $.page == 0} cannot tell "clamped to page 0"
+	 * apart from "returned some other page that happened to contain the same car".
+	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void outOfRangePageIsClampedInsteadOfFailingWith500() throws Exception {
-		carRepository.saveAndFlush(aCar().build());
+		for (int i = 0; i < 15; i++) {
+			carRepository.saveAndFlush(aCar().modelo("Clamp " + i).build());
+		}
 
-		mockMvc
-				.perform(get("/api/cars").param("page", "-1"))
-				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.page").value(0));
+		String negativePageBody =
+				mockMvc
+						.perform(get("/api/cars").param("page", "-1"))
+						.andExpect(status().isOk())
+						.andExpect(jsonPath("$.page").value(0))
+						.andReturn()
+						.getResponse()
+						.getContentAsString();
+		String firstPageBody =
+				mockMvc
+						.perform(get("/api/cars").param("page", "0"))
+						.andExpect(status().isOk())
+						.andReturn()
+						.getResponse()
+						.getContentAsString();
+
+		assertThat(extractIds(negativePageBody)).isEqualTo(extractIds(firstPageBody));
 
 		mockMvc
 				.perform(
@@ -329,5 +358,22 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 								.param("page", String.valueOf(Integer.MAX_VALUE))
 								.param("size", "60"))
 				.andExpect(status().isOk());
+	}
+
+	/**
+	 * Extracts the {@code content[].id} values, in response order, from a {@code GET /api/cars}
+	 * JSON body.
+	 *
+	 * @param responseBody the raw JSON response body
+	 * @return the ids in the order they appear in {@code content}
+	 * @throws Exception propagated from {@link ObjectMapper#readTree}
+	 */
+	private List<String> extractIds(String responseBody) throws Exception {
+		JsonNode body = objectMapper.readTree(responseBody);
+		List<String> ids = new ArrayList<>();
+		for (JsonNode carNode : body.get("content")) {
+			ids.add(carNode.get("id").asString());
+		}
+		return ids;
 	}
 }
