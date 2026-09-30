@@ -32,6 +32,15 @@ import pt.diamondcars.catalogbackend.domain.lead.LeadRepository;
 @Service
 public class LeadForwardOutcomeRecorder {
 
+	/**
+	 * Sentinel {@code forwardAttempts} value {@link #markPermanentlyFailed(UUID)} sets to take a
+	 * lead out of {@code LeadForwardRetryService}'s retry pool forever (TASK-015 review r1,
+	 * BLOQUEADOR 1), without needing a dedicated column/migration: any {@code
+	 * app.leads.forward.max-attempts} configured value is always smaller than this, so {@code
+	 * forwardAttempts < maxAttempts} is permanently {@code false} for that lead.
+	 */
+	static final int PERMANENT_FAILURE_ATTEMPTS = Integer.MAX_VALUE;
+
 	private final LeadRepository leadRepository;
 
 	/**
@@ -54,12 +63,37 @@ public class LeadForwardOutcomeRecorder {
 	}
 
 	/**
-	 * Records a failed forwarding attempt, in a new transaction.
+	 * Records a failed, but potentially still-transient, forwarding attempt, in a new transaction.
 	 *
 	 * @param leadId the lead whose forward attempt failed
+	 * @return the lead's {@code forwardAttempts} after this increment, or {@code 0} if the lead no
+	 *     longer exists (so a caller can decide whether the ceiling was just reached)
 	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
-	public void incrementAttempts(UUID leadId) {
-		leadRepository.findById(leadId).ifPresent(lead -> lead.setForwardAttempts(lead.getForwardAttempts() + 1));
+	public int incrementAttempts(UUID leadId) {
+		return leadRepository
+				.findById(leadId)
+				.map(
+						lead -> {
+							int updatedAttempts = lead.getForwardAttempts() + 1;
+							lead.setForwardAttempts(updatedAttempts);
+							return updatedAttempts;
+						})
+				.orElse(0);
+	}
+
+	/**
+	 * Marks a lead's forwarding as permanently failed, in a new transaction (TASK-015 review r1,
+	 * BLOQUEADOR 1): used when {@code dcbo-backend} rejects the forward with 400, meaning the
+	 * payload itself is invalid and retrying the exact same payload would only ever fail the same
+	 * way. Sets {@code forwardAttempts} to {@link #PERMANENT_FAILURE_ATTEMPTS} rather than
+	 * incrementing it, so {@code LeadForwardRetryService} skips this lead on every future run
+	 * without needing its own "permanently failed" column.
+	 *
+	 * @param leadId the lead whose forward attempt was permanently rejected
+	 */
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public void markPermanentlyFailed(UUID leadId) {
+		leadRepository.findById(leadId).ifPresent(lead -> lead.setForwardAttempts(PERMANENT_FAILURE_ATTEMPTS));
 	}
 }

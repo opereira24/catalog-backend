@@ -5,11 +5,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import pt.diamondcars.catalogbackend.config.LeadForwardAsyncConfig;
 import pt.diamondcars.catalogbackend.config.LeadForwardingClientConfig;
 import pt.diamondcars.catalogbackend.domain.lead.Lead;
 import pt.diamondcars.catalogbackend.domain.lead.LeadRepository;
@@ -21,9 +24,29 @@ import pt.diamondcars.catalogbackend.domain.lead.LeadRepository;
  * again for {@link LeadForwardScheduler}'s periodic retry of anything still unforwarded.
  *
  * <p>Never lets a forwarding failure propagate to its caller (requirement 6): every exception is
- * caught, logged at {@code WARN}, and recorded on the lead itself ({@code forwardAttempts}, via
- * {@link LeadForwardOutcomeRecorder}) instead of being rethrown — a slow or down {@code
- * dcbo-backend} must never turn a 201 for the site visitor into anything else.
+ * caught, logged, and recorded on the lead itself (via {@link LeadForwardOutcomeRecorder})
+ * instead of being rethrown — a slow or down {@code dcbo-backend} must never turn a 201 for the
+ * site visitor into anything else. Two refinements from TASK-015 review r1:
+ *
+ * <ul>
+ *   <li><b>BLOQUEADOR 1</b>: a 400 response is treated as a permanent rejection ({@link
+ *       #attemptForward(Lead)} below), never retried — {@code dcbo-backend} rejecting the exact
+ *       same payload a second, third, ... time would only ever fail the same way, and counting it
+ *       as one more transient attempt just delays discovering that for no benefit. ASSUNCAO: only
+ *       {@code 400} is treated this way, not every 4xx — a {@code 401} (e.g. a misconfigured
+ *       token) or {@code 404}/{@code 409} could still resolve once the underlying cause is fixed,
+ *       so those stay in the ordinary transient-retry path.
+ *   <li><b>IMPORTANTE 1</b>: the attempt that pushes {@code forwardAttempts} to the configured
+ *       ceiling logs at {@code ERROR}, not {@code WARN} — before this, a lead abandoned after
+ *       {@code app.leads.forward.max-attempts} failed retries (e.g. ~20 minutes of {@code
+ *       dcbo-backend} downtime, at the default 5 attempts / 5-minute interval) left no trace
+ *       louder than the same {@code WARN} every other transient failure already logs.
+ * </ul>
+ *
+ * <p><b>IMPORTANTE 5</b>: {@link #onLeadCreated(LeadCreatedEvent)} is {@code @Async} (see {@link
+ * LeadForwardAsyncConfig}), so the actual HTTP call never runs on the site visitor's own request
+ * thread — before this, a slow or hanging {@code dcbo-backend} could keep the visitor waiting up
+ * to the full connect/read timeout before the 201 response was written.
  */
 @Component
 public class LeadForwarder {
@@ -42,6 +65,7 @@ public class LeadForwarder {
 	private final String internalToken;
 	private final LeadRepository leadRepository;
 	private final LeadForwardOutcomeRecorder outcomeRecorder;
+	private final int maxAttempts;
 
 	/**
 	 * Creates the forwarder with its HTTP client and dependencies.
@@ -54,25 +78,33 @@ public class LeadForwarder {
 	 * @param leadRepository the repository used to reload the lead before forwarding it
 	 * @param outcomeRecorder records the outcome of each attempt in its own, separate transaction
 	 *     (see that class's Javadoc for why it must be a different bean from this one)
+	 * @param maxAttempts the same ceiling {@code LeadForwardRetryService} enforces, reused only to
+	 *     decide when a just-recorded transient failure deserves an {@code ERROR}-level log
+	 *     instead of {@code WARN} (review r1, IMPORTANTE 1)
 	 */
 	public LeadForwarder(
 			@Qualifier(LeadForwardingClientConfig.BEAN_NAME) RestClient.Builder restClientBuilder,
 			@Value("${internal.sync.token}") String internalToken,
 			LeadRepository leadRepository,
-			LeadForwardOutcomeRecorder outcomeRecorder) {
+			LeadForwardOutcomeRecorder outcomeRecorder,
+			@Value("${app.leads.forward.max-attempts:5}") int maxAttempts) {
 		this.restClientBuilder = restClientBuilder;
 		this.internalToken = internalToken;
 		this.leadRepository = leadRepository;
 		this.outcomeRecorder = outcomeRecorder;
+		this.maxAttempts = maxAttempts;
 	}
 
 	/**
 	 * Attempts the forward strictly after the lead's creating transaction commits (requirement 6):
 	 * registered as an {@code AFTER_COMMIT} listener so a rollback of the business transaction
-	 * never triggers a forward for a lead that was never actually persisted.
+	 * never triggers a forward for a lead that was never actually persisted. Dispatched on {@link
+	 * LeadForwardAsyncConfig}'s dedicated executor (review r1, IMPORTANTE 5) so the site visitor's
+	 * own request thread never waits on it.
 	 *
 	 * @param event the just-committed lead's id, wrapped
 	 */
+	@Async(LeadForwardAsyncConfig.BEAN_NAME)
 	@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
 	public void onLeadCreated(LeadCreatedEvent event) {
 		forward(event.leadId());
@@ -80,7 +112,10 @@ public class LeadForwarder {
 
 	/**
 	 * Attempts to forward one lead to {@code dcbo-backend}, used both by {@link #onLeadCreated}
-	 * above and by {@link LeadForwardScheduler}'s periodic retry.
+	 * above and by {@link LeadForwardScheduler}'s periodic retry. Unlike {@link #onLeadCreated},
+	 * this runs synchronously on the caller's thread — always the scheduler's own background
+	 * thread, never a site visitor's request thread, so there is nothing to gain from dispatching
+	 * it asynchronously too.
 	 *
 	 * @param leadId the id of the lead to forward; silently does nothing if it no longer exists
 	 */
@@ -91,7 +126,9 @@ public class LeadForwarder {
 	/**
 	 * Performs the actual HTTP call and records its outcome via {@link #outcomeRecorder}. Never
 	 * throws: any failure (timeout, connection refused, non-2xx status) is caught, logged, and
-	 * recorded as a failed attempt instead (requirement 6).
+	 * recorded instead (requirement 6). A {@code 400} is recorded as permanent ({@link
+	 * LeadForwardOutcomeRecorder#markPermanentlyFailed(UUID)}); every other failure is recorded as
+	 * one more transient attempt (review r1, BLOQUEADOR 1/IMPORTANTE 1).
 	 *
 	 * @param lead the lead to forward
 	 */
@@ -106,9 +143,31 @@ public class LeadForwarder {
 					.retrieve()
 					.toBodilessEntity();
 			outcomeRecorder.markForwarded(lead.getId());
+		} catch (HttpClientErrorException.BadRequest exception) {
+			log.error(
+					"dcbo-backend rejected lead {} with 400 (invalid payload) - treating as a permanent"
+							+ " failure, it will not be retried: {}",
+					lead.getId(),
+					exception.getMessage());
+			outcomeRecorder.markPermanentlyFailed(lead.getId());
 		} catch (RestClientException exception) {
-			log.warn("Failed to forward lead {} to dcbo-backend", lead.getId(), exception);
-			outcomeRecorder.incrementAttempts(lead.getId());
+			int attempts = outcomeRecorder.incrementAttempts(lead.getId());
+			if (attempts >= maxAttempts) {
+				log.error(
+						"Lead {} abandoned after {} failed forwarding attempts (max-attempts={}) - "
+								+ "dcbo-backend may be unreachable or misconfigured, manual reconciliation needed",
+						lead.getId(),
+						attempts,
+						maxAttempts,
+						exception);
+			} else {
+				log.warn(
+						"Failed to forward lead {} to dcbo-backend (attempt {}/{})",
+						lead.getId(),
+						attempts,
+						maxAttempts,
+						exception);
+			}
 		}
 	}
 }
