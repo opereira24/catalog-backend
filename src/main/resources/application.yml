@@ -19,15 +19,32 @@ spring:
 server:
   port: ${PORT:8081}
 
-# Origem(ns) permitida(s) a chamar /api/** (o site publico dc) — TASK-014 requisito 6
+# Origem(ns) permitida(s) a chamar /api/** (o site publico dc) — TASK-014 requisito 6, e
+# submissao publica de leads (POST /api/leads) — TASK-015
 app:
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+  leads:
+    rate-limit:
+      max-requests: ${LEADS_RATE_LIMIT_MAX_REQUESTS:5}
+      window-minutes: ${LEADS_RATE_LIMIT_WINDOW_MINUTES:10}
+    forward:
+      max-attempts: ${LEADS_FORWARD_MAX_ATTEMPTS:5}
+      retry:
+        enabled: ${LEADS_FORWARD_RETRY_ENABLED:true}
+        interval-ms: ${LEADS_FORWARD_RETRY_INTERVAL_MS:300000}
 
-# Token partilhado que o dcbo-backend usa para autenticar chamadas de propagação
+# Token partilhado que o dcbo-backend usa para autenticar chamadas de propagação, e que este
+# servico reutiliza (TASK-015 requisito 5) para autenticar o encaminhamento de leads na direcao
+# inversa (POST /internal/leads do dcbo-backend) — e o mesmo segredo nos dois sentidos.
 internal:
   sync:
     token: ${CATALOG_SYNC_TOKEN:placeholder}
+
+# Base URL do dcbo-backend, usada pelo encaminhamento de leads (TASK-015 requisito 5)
+dcbo:
+  sync:
+    base-url: ${DCBO_SYNC_URL:http://localhost:8080}
 
 management:
   endpoints:
