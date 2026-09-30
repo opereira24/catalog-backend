@@ -543,6 +543,63 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
+	 * TASK-015 review r2, IMPORTANTE 1: a real client behind a trusted proxy that <b>appends</b> to
+	 * {@code X-Forwarded-For} (as any real reverse proxy does) cannot bypass the limit by sending a
+	 * different, fabricated left-most entry on every request — only the right-most entry (the one
+	 * the trusted proxy itself appended) is used to resolve the bucket, so the 6th submission from
+	 * this client is still rejected even though the left-most entry is different every time.
+	 *
+	 * <p>Before the fix (review r1's left-most reading), this exact sequence returned 201 twelve
+	 * times in a row with no 429 (r2's real-HTTP reproduction).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void rejectsTheSixthSubmissionEvenWhenTheLeftMostForwardedForEntryIsSpoofedAndRotates() throws Exception {
+		dcboBackend.expect(ExpectedCount.times(5), requestTo("http://localhost:8080/internal/leads")).andRespond(withSuccess());
+
+		String body = """
+				{"nome":"Spoofer Rate Limit","telefone":"913456789"}
+				""";
+
+		List<UUID> leadIds = new ArrayList<>();
+		for (int i = 0; i < 5; i++) {
+			String responseBody =
+					mockMvc
+							.perform(
+									post("/api/leads")
+											.with(request -> {
+												request.setRemoteAddr("10.0.0.201");
+												return request;
+											})
+											.header("X-Forwarded-For", "198.51.100." + i + ", 203.0.113.99")
+											.contentType(MediaType.APPLICATION_JSON)
+											.content(body))
+							.andExpect(status().isCreated())
+							.andReturn()
+							.getResponse()
+							.getContentAsString();
+			leadIds.add(extractId(responseBody));
+		}
+
+		mockMvc
+				.perform(
+						post("/api/leads")
+								.with(request -> {
+									request.setRemoteAddr("10.0.0.201");
+									return request;
+								})
+								.header("X-Forwarded-For", "198.51.100.99, 203.0.113.99")
+								.contentType(MediaType.APPLICATION_JSON)
+								.content(body))
+				.andExpect(status().isTooManyRequests());
+
+		for (UUID leadId : leadIds) {
+			awaitForwardOutcome(leadId);
+		}
+	}
+
+	/**
 	 * TASK-015 review r1, IMPORTANTE 3: 5 CORS preflight {@code OPTIONS} requests from the same
 	 * address, followed by 5 real {@code POST} submissions from that same address, all 5 {@code
 	 * POST}s still succeed — proving the preflights never consumed any of the visitor's quota.

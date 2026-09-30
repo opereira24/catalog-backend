@@ -28,6 +28,8 @@ app:
     rate-limit:
       max-requests: ${LEADS_RATE_LIMIT_MAX_REQUESTS:5}
       window-minutes: ${LEADS_RATE_LIMIT_WINDOW_MINUTES:10}
+      trusted-proxy-hops: ${LEADS_RATE_LIMIT_TRUSTED_PROXY_HOPS:1}
+      cleanup-interval-ms: ${LEADS_RATE_LIMIT_CLEANUP_INTERVAL_MS:300000}
     forward:
       max-attempts: ${LEADS_FORWARD_MAX_ATTEMPTS:5}
       retry:
