@@ -22,6 +22,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import pt.diamondcars.catalogbackend.web.dto.ApiError;
 import pt.diamondcars.catalogbackend.web.exception.CarNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
 
 /**
  * Central exception-to-HTTP-response translation for the whole API, per TASK-014 requirement 7.
@@ -98,6 +99,20 @@ public class ApiExceptionHandler {
 			MethodArgumentTypeMismatchException exception, HttpServletRequest request) {
 		return respond(
 				HttpStatus.BAD_REQUEST, "Parametro '" + exception.getName() + "' com valor invalido", request);
+	}
+
+	/**
+	 * Maps {@link RateLimitExceededException} (too many {@code POST /api/leads} submissions from
+	 * the same IP within the configured window, TASK-015 requirement 4) to 429.
+	 *
+	 * @param exception the exception {@code RateLimitInterceptor} throws
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 429 response body
+	 */
+	@ExceptionHandler(RateLimitExceededException.class)
+	public ResponseEntity<ApiError> handleRateLimitExceeded(
+			RateLimitExceededException exception, HttpServletRequest request) {
+		return respond(HttpStatus.TOO_MANY_REQUESTS, "Demasiados pedidos - tente novamente mais tarde", request);
 	}
 
 	/**
