@@ -4,10 +4,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withBadRequest;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -26,11 +33,13 @@ import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
  * {@code dcbo-backend}, never a real HTTP call.
  *
  * <p>{@code LeadForwardScheduler} itself (the {@code @Scheduled} cron trigger) is disabled via
- * {@code app.leads.forward.retry.enabled=false} below (requirement 7: "tem de estar desligado
- * por defeito em testes"); this test invokes {@link LeadForwardRetryService#retryPendingForwards()}
- * directly instead, as the acceptance criterion requires.
+ * {@code app.leads.forward.retry.enabled=false}, inherited from {@link
+ * AbstractPostgresIntegrationTest} (requirement 7: "tem de estar desligado por defeito em
+ * testes"; review r1, IMPORTANTE 4); this test invokes {@link
+ * LeadForwardRetryService#retryPendingForwards()} directly instead, as the acceptance criterion
+ * requires.
  */
-@SpringBootTest(properties = "app.leads.forward.retry.enabled=false")
+@SpringBootTest
 class LeadForwarderTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired private LeadRepository leadRepository;
@@ -109,5 +118,68 @@ class LeadForwarderTest extends AbstractPostgresIntegrationTest {
 		leadForwardRetryService.retryPendingForwards();
 
 		dcboBackend.verify();
+	}
+
+	/**
+	 * TASK-015 review r1, BLOQUEADOR 1: a 400 response from {@code dcbo-backend} (the shape of
+	 * response a payload it rejects as invalid would produce) is treated as a permanent failure —
+	 * the lead's {@code forwardAttempts} is set to {@link
+	 * LeadForwardOutcomeRecorder#PERMANENT_FAILURE_ATTEMPTS} in a single attempt, and a second
+	 * retry run makes no further HTTP call at all.
+	 */
+	@Test
+	void retryTreatsA400AsPermanentAndNeverRetriesTheSameLeadAgain() {
+		Lead pending =
+				leadRepository.saveAndFlush(Lead.builder().nome("Invalido").telefone("944444444").build());
+
+		dcboBackend.expect(requestTo("http://localhost:8080/internal/leads")).andRespond(withBadRequest());
+
+		leadForwardRetryService.retryPendingForwards();
+
+		Lead afterFirstAttempt = leadRepository.findById(pending.getId()).orElseThrow();
+		assertThat(afterFirstAttempt.getForwardedAt()).isNull();
+		assertThat(afterFirstAttempt.getForwardAttempts())
+				.isEqualTo(LeadForwardOutcomeRecorder.PERMANENT_FAILURE_ATTEMPTS);
+
+		// No new expectation registered on dcboBackend: a second retry run attempting any HTTP call
+		// at all would fail this verification.
+		leadForwardRetryService.retryPendingForwards();
+		dcboBackend.verify();
+	}
+
+	/**
+	 * TASK-015 review r1, IMPORTANTE 1: the attempt that pushes a lead's {@code forwardAttempts} to
+	 * the configured ceiling (default 5) logs at {@code ERROR}, not just {@code WARN} — so a lead
+	 * abandoned after exhausting every retry never disappears with nothing louder than the same log
+	 * level every ordinary transient failure already produces.
+	 */
+	@Test
+	void logsAnErrorWhenTheLastAllowedAttemptStillFails() {
+		Lead almostExhausted =
+				leadRepository.saveAndFlush(
+						Lead.builder().nome("Quase Esgotado").telefone("955555555").forwardAttempts(4).build());
+
+		dcboBackend.expect(requestTo("http://localhost:8080/internal/leads")).andRespond(withServerError());
+
+		Logger leadForwarderLogger = (Logger) LoggerFactory.getLogger(LeadForwarder.class);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		leadForwarderLogger.addAppender(appender);
+
+		try {
+			leadForwardRetryService.retryPendingForwards();
+		} finally {
+			leadForwarderLogger.detachAppender(appender);
+		}
+
+		assertThat(appender.list)
+				.anySatisfy(
+						event -> {
+							assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+							assertThat(event.getFormattedMessage()).contains("abandoned");
+						});
+
+		Lead reloaded = leadRepository.findById(almostExhausted.getId()).orElseThrow();
+		assertThat(reloaded.getForwardAttempts()).isEqualTo(5);
 	}
 }
