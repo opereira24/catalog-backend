@@ -8,10 +8,10 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 
 /**
- * Spring Data repository for {@link Car}, with the derived queries TASK-013 requirement 8 lists
- * as needed by the public site's listing pages, plus {@link JpaSpecificationExecutor} so
- * TASK-014's {@code CarQueryService} can compose the optional filters {@code GET /api/cars}
- * accepts (brand, fuel, price/year range, featured, sold) without one derived-query method per
+ * Spring Data repository for {@link Car}: the derived queries the public catalog uses, plus the
+ * ones {@code dcbo-backend}'s back-office services call (ported by TASK-001, only the methods
+ * with a production caller), plus {@link JpaSpecificationExecutor} so {@code CarQueryService} can
+ * compose the optional filters {@code GET /api/cars} accepts without one derived-query method per
  * combination.
  */
 public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificationExecutor<Car> {
@@ -36,12 +36,12 @@ public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificatio
 	/**
 	 * Lists cars flagged as highlighted and not yet sold, most recently created first with {@code
 	 * id} ascending as a tiebreaker, capped by {@code pageable} — backs {@code
-	 * GET /api/cars/highlights} (TASK-014 requirement 3), which must never return more than 8 cars.
+	 * GET /api/cars/highlights}, which must never return more than 8 cars.
 	 *
 	 * <p>The {@code id} tiebreaker makes which 8 cars get selected deterministic even when more
 	 * than 8 highlighted, unsold cars share the exact same {@code createdAt} (same rationale as
-	 * {@code CarQueryService#DEFAULT_SORT}; fixed per TASK-014 review r1, SUGESTÃO 1) — without it,
-	 * Postgres is free to pick a different subset of the tied rows on every call.
+	 * {@code CarQueryService#DEFAULT_SORT}) — without it, Postgres is free to pick a different
+	 * subset of the tied rows on every call.
 	 *
 	 * @param pageable a pageable requesting at most the desired number of results (e.g. {@code
 	 *     PageRequest.of(0, 8)}); only its page size and offset are used, sorting is fixed to
@@ -50,4 +50,51 @@ public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificatio
 	 *     vendido = false}, most recently created first
 	 */
 	List<Car> findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDescIdAsc(Pageable pageable);
+
+	/**
+	 * Counts how many cars are currently featured, the value the back-office compares against the
+	 * 8-car limit before allowing one more car to be featured.
+	 *
+	 * @return the number of cars with {@code destaque = true}
+	 */
+	long countByDestaqueTrue();
+
+	/**
+	 * Lists cars purchased by a given client, most recently created first — backs the back-office
+	 * client's cars view ({@code dcbo/src/components/client-cars-modal.js}).
+	 *
+	 * @param clientId the {@link pt.diamondcars.catalogbackend.domain.client.Client} id to filter by
+	 * @return cars whose {@code client_id} equals {@code clientId}, ordered by {@code createdAt}
+	 *     descending
+	 */
+	List<Car> findByClientIdOrderByCreatedAtDesc(UUID clientId);
+
+	/**
+	 * Tests whether any car references a given client, used to refuse deleting a client that has
+	 * purchased cars instead of deleting it silently.
+	 *
+	 * @param clientId the {@link pt.diamondcars.catalogbackend.domain.client.Client} id to check
+	 * @return {@code true} if at least one car has this {@code client_id}
+	 */
+	boolean existsByClientId(UUID clientId);
+
+	/**
+	 * Lists cars in consignment for a given partner, most recently created first — backs the
+	 * back-office partner's cars view.
+	 *
+	 * @param partnerId the {@link pt.diamondcars.catalogbackend.domain.partner.Partner} id to filter
+	 *     by
+	 * @return cars whose {@code partner_id} equals {@code partnerId}, ordered by {@code createdAt}
+	 *     descending
+	 */
+	List<Car> findByPartnerIdOrderByCreatedAtDesc(UUID partnerId);
+
+	/**
+	 * Tests whether any car references a given partner, used to refuse deleting a partner that has
+	 * consignment cars instead of deleting it silently.
+	 *
+	 * @param partnerId the {@link pt.diamondcars.catalogbackend.domain.partner.Partner} id to check
+	 * @return {@code true} if at least one car has this {@code partner_id}
+	 */
+	boolean existsByPartnerId(UUID partnerId);
 }
