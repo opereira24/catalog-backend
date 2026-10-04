@@ -12,6 +12,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -28,13 +29,17 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.ExpectedCount;
 import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.test.web.client.match.MockRestRequestMatchers;
 import org.springframework.test.web.client.ResponseCreator;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.client.RestClient;
 import pt.diamondcars.catalogbackend.config.LeadForwardingClientConfig;
+import pt.diamondcars.catalogbackend.domain.car.Car;
+import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.domain.lead.Lead;
 import pt.diamondcars.catalogbackend.domain.lead.LeadOrigin;
 import pt.diamondcars.catalogbackend.domain.lead.LeadRepository;
+import pt.diamondcars.catalogbackend.domain.lead.LeadStatus;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 
 /**
@@ -57,6 +62,7 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired private MockMvc mockMvc;
 	@Autowired private LeadRepository leadRepository;
+	@Autowired private CarRepository carRepository;
 
 	@Autowired
 	@Qualifier(LeadForwardingClientConfig.BEAN_NAME)
@@ -65,13 +71,14 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 	private MockRestServiceServer dcboBackend;
 
 	/**
-	 * Clears every lead written by a previous test and rebinds a fresh {@link
+	 * Clears every lead (and car) written by a previous test and rebinds a fresh {@link
 	 * MockRestServiceServer} to the forwarding client, so tests never influence each other on the
 	 * shared, JVM-wide container/context ({@link AbstractPostgresIntegrationTest}).
 	 */
 	@BeforeEach
 	void setUp() {
 		leadRepository.deleteAll();
+		carRepository.deleteAll();
 		dcboBackend = MockRestServiceServer.bindTo(leadForwardingRestClientBuilder).build();
 	}
 
@@ -694,6 +701,112 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 		awaitForwardOutcome(leadId);
 		Lead saved = leadRepository.findById(leadId).orElseThrow();
 		assertThat(saved.getForwardedAt()).isNotNull();
+	}
+
+	/**
+	 * TASK-001, AC D.6 (a): a {@code carroId} of a car that exists links the lead to that car
+	 * ({@code leads.car_id} is a foreign key since V2), with {@code status = ativo}, and the forward
+	 * to {@code dcbo-backend} carries that same {@code carroId} — read from the lead's LAZY car
+	 * proxy outside any transaction, without loading the car.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void linksTheLeadToAnExistingCarAndForwardsItsCarroId() throws Exception {
+		Car car = carRepository.saveAndFlush(Car.builder()
+				.marca("BMW")
+				.modelo("320d")
+				.ano(2020)
+				.preco(new BigDecimal("25000.00"))
+				.km(50000)
+				.cor("Preto")
+				.combustivel("Diesel")
+				.transmissao("Manual")
+				.origem("Nacional")
+				.build());
+		dcboBackend
+				.expect(requestTo("http://localhost:8080/internal/leads"))
+				.andExpect(MockRestRequestMatchers.jsonPath("$.carroId").value(car.getId().toString()))
+				.andExpect(MockRestRequestMatchers.jsonPath("$.origem").value("website"))
+				.andRespond(withSuccess());
+
+		String responseBody =
+				mockMvc
+						.perform(
+								post("/api/leads")
+										.with(request -> {
+											request.setRemoteAddr("10.0.0.18");
+											return request;
+										})
+										.contentType(MediaType.APPLICATION_JSON)
+										.content(
+												"""
+												{"nome":"Lead Com Carro","telefone":"913456789",
+												 "carroId":"%s","carroMarca":"BMW","carroModelo":"320d"}
+												"""
+														.formatted(car.getId())))
+						.andExpect(status().isCreated())
+						.andReturn()
+						.getResponse()
+						.getContentAsString();
+
+		UUID leadId = extractId(responseBody);
+		awaitForwardOutcome(leadId);
+		dcboBackend.verify();
+
+		Lead saved = leadRepository.findById(leadId).orElseThrow();
+		assertThat(saved.getCar()).isNotNull();
+		assertThat(saved.getCar().getId()).isEqualTo(car.getId());
+		assertThat(saved.getStatus()).isEqualTo(LeadStatus.ATIVO);
+		assertThat(saved.getOrigem()).isEqualTo(LeadOrigin.WEBSITE);
+		assertThat(saved.getForwardedAt()).isNotNull();
+	}
+
+	/**
+	 * TASK-001, AC D.6 (b): a {@code carroId} that matches no car still answers 201 (never 404 nor
+	 * 500, the public contract the site relies on): the lead is saved without car, with its {@code
+	 * carroMarca}/{@code carroModelo} snapshot, {@code origem = website} (decided by the presence of
+	 * {@code carroId}, not by the car existing) and {@code status = ativo}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void savesTheLeadWithoutCarWhenCarroIdMatchesNoCar() throws Exception {
+		dcboBackend
+				.expect(requestTo("http://localhost:8080/internal/leads"))
+				.andExpect(content().string(Matchers.containsString("\"carroId\":null")))
+				.andRespond(withSuccess());
+
+		String responseBody =
+				mockMvc
+						.perform(
+								post("/api/leads")
+										.with(request -> {
+											request.setRemoteAddr("10.0.0.19");
+											return request;
+										})
+										.contentType(MediaType.APPLICATION_JSON)
+										.content(
+												"""
+												{"nome":"Carro Desconhecido","telefone":"913456789",
+												 "carroId":"%s","carroMarca":"Fiat","carroModelo":"Punto"}
+												"""
+														.formatted(UUID.randomUUID())))
+						.andExpect(status().isCreated())
+						.andReturn()
+						.getResponse()
+						.getContentAsString();
+
+		UUID leadId = extractId(responseBody);
+		awaitForwardOutcome(leadId);
+		dcboBackend.verify();
+
+		Lead saved = leadRepository.findById(leadId).orElseThrow();
+		assertThat(saved.getCar()).isNull();
+		assertThat(saved.getCarroMarca()).isEqualTo("Fiat");
+		assertThat(saved.getCarroModelo()).isEqualTo("Punto");
+		assertThat(saved.getOrigem()).isEqualTo(LeadOrigin.WEBSITE);
+		assertThat(saved.getStatus()).isEqualTo(LeadStatus.ATIVO);
 	}
 
 	/**
