@@ -9,6 +9,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.ErrorResponseException;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
@@ -22,6 +23,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import pt.diamondcars.catalogbackend.web.dto.ApiError;
 import pt.diamondcars.catalogbackend.web.exception.CarNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
 import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
 
@@ -127,6 +129,35 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(LeadValidationException.class)
 	public ResponseEntity<ApiError> handleLeadValidation(LeadValidationException exception, HttpServletRequest request) {
 		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link InactiveUserException} (the authenticated caller's {@code app_users} profile has
+	 * {@code active = false}, TASK-002 requirement 5) to 403. Thrown by {@code
+	 * ActiveUserInterceptor} before the controller method, so before any {@code @PreAuthorize}.
+	 *
+	 * @param exception the exception thrown by the interceptor
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 403 response body
+	 */
+	@ExceptionHandler(InactiveUserException.class)
+	public ResponseEntity<ApiError> handleInactiveUser(InactiveUserException exception, HttpServletRequest request) {
+		return respond(HttpStatus.FORBIDDEN, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps Spring Security's {@link AccessDeniedException} (raised by {@code @PreAuthorize} when an
+	 * authenticated caller lacks the required role) to 403 in the {@link ApiError} envelope.
+	 * Required, not cosmetic: without it {@link #handleUnexpected(Exception, HttpServletRequest)}
+	 * would turn every role refusal into a 500 (TASK-002, AC D.6).
+	 *
+	 * @param exception the exception {@code @PreAuthorize} raises when denying access
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 403 response body
+	 */
+	@ExceptionHandler(AccessDeniedException.class)
+	public ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException exception, HttpServletRequest request) {
+		return respond(HttpStatus.FORBIDDEN, "Autenticado, mas sem a role exigida para esta operacao", request);
 	}
 
 	/**
