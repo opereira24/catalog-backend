@@ -37,8 +37,8 @@ import tools.jackson.databind.json.JsonMapper;
  * PublicEndpoints} is open and everything else needs a valid token. Role rules live in {@code
  * @PreAuthorize} on the controllers (enabled by {@link EnableMethodSecurity}), never here.
  *
- * <p>Decisions that are not obvious from the code, each one measured (see {@code CLAUDE.md},
- * "Seguranca"):
+ * <p>Decisions that are not obvious from the code, each one measured (see {@code CLAUDE.md} in
+ * this package):
  *
  * <ul>
  *   <li>The {@code ERROR} dispatch is permitted. Spring Security authorizes every dispatch type,
