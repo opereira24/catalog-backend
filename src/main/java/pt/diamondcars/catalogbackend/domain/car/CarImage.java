@@ -12,19 +12,16 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
-import pt.diamondcars.catalogbackend.domain.support.AbstractGeneratedIdEntity;
+import pt.diamondcars.catalogbackend.domain.support.AbstractDomainEntity;
 
 /**
- * A single photo of a {@link Car}, mapped over the {@code car_images} child table of {@code
- * V1__init.sql}.
+ * A single photo of a {@link Car}, mapped over the {@code car_images} child table ({@code
+ * created_at} added by {@code V2__unified_back_office_schema.sql}; photos older than V2 carry their
+ * car's {@code created_at}, the honest lower bound).
  *
- * <p>Owned by {@link Car} ({@code car_id ON DELETE CASCADE}, TASK-013 requirement 3): always
- * created/removed through {@link Car#addImage(CarImage)}/{@link Car#removeImage(CarImage)}, never
- * persisted independently — hence no dedicated {@code CarImageRepository}. Unlike {@code
- * dcbo-backend}'s equivalent table, {@code car_images} here has neither {@code created_at} nor
- * {@code updated_at} (TASK-013 requirement 3 lists only {@code car_id}/{@code url}/{@code
- * thumbnail_url}/{@code position}), so this entity extends {@link AbstractGeneratedIdEntity}
- * directly instead of an auditable variant.
+ * <p>Owned by {@link Car} ({@code car_id ON DELETE CASCADE}): always created/removed through
+ * {@link Car#addImage(CarImage)}/{@link Car#removeImage(CarImage)}, never persisted independently —
+ * hence no dedicated {@code CarImageRepository}.
  */
 @Getter
 @Setter
@@ -34,7 +31,7 @@ import pt.diamondcars.catalogbackend.domain.support.AbstractGeneratedIdEntity;
 @ToString(of = {"url", "position"})
 @Entity
 @Table(name = "car_images")
-public class CarImage extends AbstractGeneratedIdEntity {
+public class CarImage extends AbstractDomainEntity {
 
 	@ManyToOne(fetch = FetchType.LAZY)
 	@JoinColumn(name = "car_id", nullable = false)

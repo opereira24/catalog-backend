@@ -31,6 +31,11 @@ record LeadForwardPayload(
 	/**
 	 * Builds the payload from a persisted {@link Lead}.
 	 *
+	 * <p>{@code LeadForwarder} calls this outside any transaction, with {@link Lead#getCar()} still
+	 * an uninitialized LAZY proxy. Reading only its id is safe: Hibernate answers {@code getId()} on
+	 * a proxy from the proxy itself, without loading the car (covered by {@code
+	 * PublicLeadControllerTest}, which asserts the forwarded {@code carroId}).
+	 *
 	 * @param lead the lead to forward, never {@code null}
 	 * @return the corresponding payload
 	 */
@@ -40,7 +45,7 @@ record LeadForwardPayload(
 				lead.getEmail(),
 				lead.getTelefone(),
 				lead.getMensagem(),
-				lead.getCarId(),
+				lead.getCar() == null ? null : lead.getCar().getId(),
 				lead.getCarroMarca(),
 				lead.getCarroModelo(),
 				lead.getOrigem().getValue());

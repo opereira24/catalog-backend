@@ -8,6 +8,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -23,9 +25,14 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import pt.diamondcars.catalogbackend.domain.car.Car;
 import pt.diamondcars.catalogbackend.domain.car.CarImage;
 import pt.diamondcars.catalogbackend.domain.car.CarRepository;
+import pt.diamondcars.catalogbackend.domain.client.Client;
+import pt.diamondcars.catalogbackend.domain.client.ClientRepository;
+import pt.diamondcars.catalogbackend.domain.partner.Partner;
+import pt.diamondcars.catalogbackend.domain.partner.PartnerRepository;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -39,30 +46,119 @@ import tools.jackson.databind.ObjectMapper;
 @AutoConfigureMockMvc
 class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 
+	/**
+	 * The exact keys of every car object the public API returns today, which {@code dc} consumes.
+	 * Frozen by {@link #publicCarObjectsExposeExactlyTheFrozenKeysEvenWithEveryInternalFieldFilled()}
+	 * (TASK-001, AC D.7): adding a key is a contract change and must be a deliberate decision, not a
+	 * side effect of a new entity field.
+	 */
+	private static final List<String> PUBLIC_CAR_KEYS = List.of(
+			"id", "_id", "marca", "modelo", "ano", "preco", "km", "cor", "combustivel", "descricao",
+			"observacoes", "garantiaMeses", "vendido", "reservado", "destaque", "images", "createdAt",
+			"updatedAt");
+
 	@Autowired private MockMvc mockMvc;
 	@Autowired private CarRepository carRepository;
+	@Autowired private PartnerRepository partnerRepository;
+	@Autowired private ClientRepository clientRepository;
 	@Autowired private DataSource dataSource;
 	@Autowired private ObjectMapper objectMapper;
 
 	/**
-	 * Clears every car written by a previous test, so tests never influence each other on the
-	 * shared, JVM-wide container ({@link AbstractPostgresIntegrationTest}).
+	 * Clears every car (and the partners/clients cars may point to) written by a previous test, so
+	 * tests never influence each other on the shared, JVM-wide container ({@link
+	 * AbstractPostgresIntegrationTest}).
 	 */
 	@BeforeEach
 	void cleanDatabase() {
 		carRepository.deleteAll();
+		partnerRepository.deleteAll();
+		clientRepository.deleteAll();
 	}
 
 	private static Car.CarBuilder aCar() {
 		return Car.builder()
-				.id(UUID.randomUUID())
 				.marca("BMW")
 				.modelo("320d")
 				.ano(2020)
 				.preco(new BigDecimal("25000.00"))
 				.km(50000)
 				.cor("Preto")
-				.combustivel("Diesel");
+				.combustivel("Diesel")
+				.transmissao("Manual")
+				.origem("Nacional");
+	}
+
+	/**
+	 * TASK-001, AC D.7: with a car that has <b>every</b> internal back-office field filled (purchase
+	 * price, consignment, partner, client, commission, purchase/sale dates, sale price, sync stamp,
+	 * gearbox, provenance), the car object of {@code GET /api/cars/{id}}, each element of {@code
+	 * content} of {@code GET /api/cars} and each element of {@code GET /api/cars/highlights} have
+	 * exactly the 18 public keys — no internal field leaks, no public field disappears.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void publicCarObjectsExposeExactlyTheFrozenKeysEvenWithEveryInternalFieldFilled() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Auto Silva").build());
+		Client client =
+				clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Car car = aCar()
+				.transmissao("Automática")
+				.origem("Importado")
+				.observacoes("Revisão feita")
+				.destaque(true)
+				.precoCompra(new BigDecimal("18000.00"))
+				.consignacao(true)
+				.partner(partner)
+				.client(client)
+				.commissionValue(new BigDecimal("750.00"))
+				.dataCompra(LocalDate.of(2026, 7, 15))
+				.dataVenda(OffsetDateTime.parse("2026-09-01T15:30:00Z"))
+				.precoVenda(new BigDecimal("24500.00"))
+				.syncedAt(OffsetDateTime.parse("2026-08-01T09:00:00Z"))
+				.build();
+		car.addImage(CarImage.builder().url("https://img/1.jpg").build());
+		carRepository.saveAndFlush(car);
+
+		JsonNode detail = getJson(get("/api/cars/{id}", car.getId()));
+		JsonNode listing = getJson(get("/api/cars"));
+		JsonNode highlights = getJson(get("/api/cars/highlights"));
+
+		assertThat(fieldNames(detail)).containsExactlyInAnyOrderElementsOf(PUBLIC_CAR_KEYS);
+		assertThat(listing.get("content")).hasSize(1);
+		assertThat(fieldNames(listing.get("content").get(0)))
+				.containsExactlyInAnyOrderElementsOf(PUBLIC_CAR_KEYS);
+		assertThat(highlights).hasSize(1);
+		assertThat(fieldNames(highlights.get(0))).containsExactlyInAnyOrderElementsOf(PUBLIC_CAR_KEYS);
+		assertThat(detail.get("observacoes").asString()).isEqualTo("Revisão feita");
+	}
+
+	/**
+	 * Performs a request expected to answer 200 and parses its JSON body.
+	 *
+	 * @param request the request to perform
+	 * @return the parsed body
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	private JsonNode getJson(MockHttpServletRequestBuilder request) throws Exception {
+		String body = mockMvc
+				.perform(request)
+				.andExpect(status().isOk())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+		return objectMapper.readTree(body);
+	}
+
+	/**
+	 * Lists the top-level keys of a JSON object.
+	 *
+	 * @param node a JSON object
+	 * @return its field names, in document order
+	 */
+	private static List<String> fieldNames(JsonNode node) {
+		return new ArrayList<>(node.propertyNames());
 	}
 
 	/**

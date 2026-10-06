@@ -1,11 +1,15 @@
 package pt.diamondcars.catalogbackend.service;
 
+import java.util.UUID;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import pt.diamondcars.catalogbackend.domain.car.Car;
+import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.domain.lead.Lead;
 import pt.diamondcars.catalogbackend.domain.lead.LeadOrigin;
 import pt.diamondcars.catalogbackend.domain.lead.LeadRepository;
+import pt.diamondcars.catalogbackend.domain.lead.LeadStatus;
 import pt.diamondcars.catalogbackend.util.TextSanitizer;
 import pt.diamondcars.catalogbackend.web.dto.LeadRequest;
 import pt.diamondcars.catalogbackend.web.dto.LeadResponse;
@@ -22,16 +26,22 @@ import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 public class LeadService {
 
 	private final LeadRepository leadRepository;
+	private final CarRepository carRepository;
 	private final ApplicationEventPublisher eventPublisher;
 
 	/**
 	 * Creates the service with its dependencies.
 	 *
 	 * @param leadRepository the repository leads are persisted through
+	 * @param carRepository used to resolve a request's {@code carroId} to the car it refers to
 	 * @param eventPublisher used to publish {@link LeadCreatedEvent} after every successful save
 	 */
-	public LeadService(LeadRepository leadRepository, ApplicationEventPublisher eventPublisher) {
+	public LeadService(
+			LeadRepository leadRepository,
+			CarRepository carRepository,
+			ApplicationEventPublisher eventPublisher) {
 		this.leadRepository = leadRepository;
+		this.carRepository = carRepository;
 		this.eventPublisher = eventPublisher;
 	}
 
@@ -39,7 +49,10 @@ public class LeadService {
 	 * Persists a lead submitted by the public site, sanitizing every free-text field (requirement
 	 * 3) and deriving {@link LeadOrigin} from whether a car is referenced (requirement 2): {@link
 	 * LeadOrigin#WEBSITE} when {@code carroId} is present, {@link LeadOrigin#WEBSITE_CONTACTO}
-	 * otherwise — the exact two values the public site's own forms already use.
+	 * otherwise — the exact two values the public site's own forms already use. The status is
+	 * always {@link LeadStatus#ATIVO}, what the site has always written, set explicitly rather than
+	 * left to the entity's builder default ({@link LeadStatus#CONTACTADO}). A {@code carroId} that
+	 * matches no car still yields 201 (see {@link #findCar(UUID)}).
 	 *
 	 * <p>Every length bound is checked <b>after</b> sanitizing (TASK-015 review r1, BLOQUEADOR 1):
 	 * checking before let a value grow past {@code dcbo-backend}'s own limit once HTML-entity
@@ -76,14 +89,31 @@ public class LeadService {
 						// free-text fields rather than because it can ever actually change the value.
 						.telefone(TextSanitizer.sanitize(request.telefone()))
 						.mensagem(mensagem)
-						.carId(request.carroId())
+						.car(findCar(request.carroId()))
 						.carroMarca(carroMarca)
 						.carroModelo(carroModelo)
+						.status(LeadStatus.ATIVO)
 						.origem(request.carroId() != null ? LeadOrigin.WEBSITE : LeadOrigin.WEBSITE_CONTACTO)
 						.build();
 		Lead saved = leadRepository.save(lead);
 		eventPublisher.publishEvent(new LeadCreatedEvent(saved.getId()));
 		return new LeadResponse(saved.getId());
+	}
+
+	/**
+	 * Resolves the car a lead is about, tolerating an id that matches no car (TASK-001).
+	 *
+	 * <p>{@code leads.car_id} is a foreign key since V2, so an unknown id can no longer be stored
+	 * as is. A visitor may still send one (a car deleted while its page was open, a stale link), and
+	 * the public contract never fails for that: the lead is saved without car, keeping the {@code
+	 * carroMarca}/{@code carroModelo} snapshot, and {@code origem} stays decided by the presence of
+	 * {@code carroId} in the request, not by whether the car exists.
+	 *
+	 * @param carroId the id sent by the public site, or {@code null} for a general contact
+	 * @return the matching car, or {@code null} when {@code carroId} is {@code null} or unknown
+	 */
+	private Car findCar(UUID carroId) {
+		return carroId == null ? null : carRepository.findById(carroId).orElse(null);
 	}
 
 	/**

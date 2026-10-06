@@ -4,15 +4,17 @@ import java.util.Arrays;
 import pt.diamondcars.catalogbackend.domain.support.PersistentEnum;
 
 /**
- * Origin of a {@link Lead}, matching the two values the public site ({@code dc}) ever submits and
- * the {@code CHECK} constraint of {@code leads.origem} in {@code V1__init.sql}: {@link #WEBSITE}
- * (car detail page interest form) and {@link #WEBSITE_CONTACTO} (general contact form, no
- * specific car).
+ * Origin of a {@link Lead}, matching the {@code leads_origem_check} constraint ({@code
+ * V2__unified_back_office_schema.sql}): {@link #WEBSITE} (car detail page interest form, {@code
+ * dc/src/services/firebaseService.js:104}), {@link #WEBSITE_CONTACTO} (general contact form, no
+ * specific car, {@code dc/src/services/firebaseService.js:131}) and {@link #BACKOFFICE} (a lead
+ * created directly in the back-office, which never sends an {@code origem} itself).
  */
 public enum LeadOrigin implements PersistentEnum {
 
 	WEBSITE("website"),
-	WEBSITE_CONTACTO("website-contacto");
+	WEBSITE_CONTACTO("website-contacto"),
+	BACKOFFICE("backoffice");
 
 	private final String value;
 
