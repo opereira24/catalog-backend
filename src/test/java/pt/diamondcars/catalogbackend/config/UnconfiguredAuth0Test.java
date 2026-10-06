@@ -89,13 +89,24 @@ class UnconfiguredAuth0Test extends AbstractPostgresIntegrationTest {
 		assertThat(output.getAll()).contains("WARN").contains("AUTH0_ISSUER_URI e/ou AUTH0_AUDIENCE em falta");
 	}
 
-	/** Accepting tokens without checking {@code aud} would let in tokens issued for other APIs of
-	 * the tenant. */
+	/**
+	 * Accepting tokens without checking {@code aud} would let in tokens issued for other APIs of
+	 * the tenant. The issuer is a closed local port on purpose: if this branch ever built a real
+	 * decoder, the discovery would fail with {@link JwtDecoderInitializationException} instead of
+	 * {@link BadJwtException}, and no test could reach a real tenant (an earlier version of this
+	 * test used the production issuer and a mutant that dropped the audience check survived).
+	 */
 	@Test
-	void issuerWithoutAudienceAlsoRejectsEveryToken() {
-		JwtDecoder decoder = new SecurityConfig().jwtDecoder("https://oteustand.eu.auth0.com/", "");
+	void issuerWithoutAudienceAlsoRejectsEveryTokenWithoutNetwork() throws Exception {
+		int closedPort;
+		try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+			closedPort = socket.getLocalPort();
+		}
+		JwtDecoder decoder = new SecurityConfig().jwtDecoder("http://127.0.0.1:" + closedPort + "/", "");
 
-		assertThatThrownBy(() -> decoder.decode(FORGED_ADMIN_TOKEN)).isInstanceOf(BadJwtException.class);
+		assertThatThrownBy(() -> decoder.decode(FORGED_ADMIN_TOKEN))
+				.isExactlyInstanceOf(BadJwtException.class)
+				.hasMessage(SecurityConfig.INVALID_TOKEN_MESSAGE);
 	}
 
 	/**
