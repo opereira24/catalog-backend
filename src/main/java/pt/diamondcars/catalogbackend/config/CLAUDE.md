@@ -46,16 +46,51 @@ seria apanhado implicitamente pelo DSL e tirar a linha explícita não se notava
   tenant Auth0 é de quem o registar primeiro, e esse terceiro passava a emitir tokens aceites;
   um tenant inexistente prendia cada pedido à espera de rede (o arquiteto mediu um `curl` a
   esgotar 10 s em 2026-10-04).
-- Com os dois preenchidos: `SupplierJwtDecoder` (sem rede no arranque), `RestTemplate` com 3 s
-  de connect e read timeout (o default não tem nenhum), validador `iss` + tempo + `aud`
-  explícito (`SecurityConfig.validator`).
-- **Auth0 inalcançável com config real = 500, deliberado.** A descoberta OIDC falha com
-  `JwtDecoderInitializationException`, que não é erro de autenticação: o pedido acaba no corpo
-  de erro do Boot. Não é 401 de propósito (o token pode ser válido e o `dcbo` terminaria a
-  sessão). Tenta de novo no pedido seguinte. Os públicos não são afetados.
+- Com os dois preenchidos: `NimbusJwtDecoder.withJwkSource(Auth0JwkSource)`, só RS256 (`none` e
+  HMAC recusados antes de procurar chave), validador `iss` + tempo + `aud` explícito
+  (`SecurityConfig.validator`). **Sem descoberta OIDC**: o JWKS vem de
+  `<issuer>.well-known/jwks.json`, onde o Auth0 o publica sempre; uma chamada ao Auth0 em vez de
+  duas, nenhuma no arranque.
+- `typ` do token tem de ser `JWT` ou ausente (`JwtValidators` do Spring Security 7). O Auth0 emite
+  `typ: JWT` por omissão; se o perfil de token da API for mudado para RFC 9068 (`at+jwt`), todos
+  os tokens passam a 401.
+- **Auth0 inalcançável com config real = 500, deliberado.** Não é 401 de propósito (o token pode
+  ser válido e o `dcbo` terminaria a sessão). O 500 sai por `sendError` no failure handler do
+  filtro de bearer (`SecurityConfig.bearerAuthenticationFailureHandler`), com o corpo de erro do
+  Boot e uma linha `DEBUG`. O handler por omissão do Spring relança a exceção e o Tomcat escreve
+  uma stack trace `ERROR` por pedido (medido na review r1: 90 MB de log em 20 s).
 - `AUTH0_ROLES_CLAIM` tem default de produção `https://oteustand.pt/roles`. Uma variável de
   ambiente **definida e vazia não cai no default** do `${VAR:default}` (dá `""`, medido): zero
   roles para todos. Por isso o `.env.example` traz o valor e não a linha vazia.
+
+## Auth0 lento ou em baixo: `Auth0JwkSource`
+
+Medido na review r1 (2026-10-06) com o `SupplierJwtDecoder` + `withIssuerLocation`: com o Auth0
+mudo, 250 pedidos anónimos com `Bearer x.y.z` puseram `GET /api/cars` em timeout de 30 s (a
+descoberta OIDC é serializada, 3 s por pedido, e a falha não fica guardada); com o JWKS pendurado e
+`kid` inventados, públicos e admin a 14,5 s (o `SpringJWKSource` faz lock em cada lookup e vai
+buscar o JWKS de novo a cada `kid` desconhecido). O `CachingJWKSetSource` do Nimbus também não
+serve: deixa esperar um número ilimitado de pedidos e responde 500 a um `kid` desconhecido
+limitado por rate limit. Regras do `Auth0JwkSource`, cada uma com teste em `Auth0JwkSourceTest`:
+
+- `kid` conhecido: memória, sem lock, sem rede, mesmo com o Auth0 em baixo (as últimas chaves boas
+  ficam até um fetch ter sucesso).
+- Sem chaves ou `kid` desconhecido: um só pedido vai ao Auth0 (3 s connect + 3 s read), no máximo 8
+  esperam por ele (até 6 s), os restantes respondem logo. Nunca mais de 9 threads do Tomcat presas
+  pelo Auth0, seja qual for o número de pedidos.
+- Intervalo mínimo de 10 s entre tentativas (contado do fim da anterior): é a cache negativa depois
+  de uma falha e o limite para `kid` inventados (no máximo um fetch por intervalo). Quando o Auth0
+  volta, o admin passa no máximo 10 s depois.
+- Chaves com mais de 5 min: renovadas numa virtual thread, o pedido não espera. Uma chave revogada
+  no Auth0 deixa de ser aceite até 5 min depois.
+- Resposta: chave encontrada; nenhuma (401) se as chaves são atuais; `KeySourceException` (500) se
+  não há chaves ou a última tentativa falhou (não é possível confirmar o `kid`).
+- Log: uma linha `WARN` por fetch falhado (no máximo uma por intervalo), uma `INFO` quando volta.
+- Um token que nem é JWT (`x.y.z`) é 401 sem chegar ao Auth0.
+- Medição (2026-10-07, jar em processo real, 250 clientes durante 20 s, numa máquina de 8 núcleos
+  que corre também o gerador de carga): o "antes" e o "depois" estão nas `## Notas` da TASK-002.
+  Com 5000 pedidos/s o próprio gerador satura o CPU: a cauda de ~1 s nos públicos aparece igual
+  num controlo sem `AUTH0_*` (401 imediato), não vem do Auth0.
 
 ## Erros 401/403
 
@@ -87,8 +122,17 @@ o bean mude de nome ou apareça um segundo.
 ## Testes
 
 - `@SpringBootTest` sem `AUTH0_*` (o default) nunca faz rede. Testes que precisem de um issuer
-  usam uma porta local fechada ou um `ServerSocket` que nunca responde, nunca um host real: um
-  host real esconde mutantes (o decode vai à rede e falha por outro motivo).
+  usam `config/support/FakeAuth0` (tenant em processo: JWKS com chaves RSA geradas, tokens RS256,
+  contador de pedidos, `hang()`), uma porta local fechada ou um `ServerSocket` que nunca responde,
+  nunca um host real: um host real esconde mutantes (o decode vai à rede e falha por outro motivo).
+- O decoder de produção só é provado por `Auth0JwtDecoderTest` (tokens RS256 do `FakeAuth0`): o
+  decoder HMAC de teste dos outros testes tem o seu próprio validador de `aud`, e por isso apagar
+  `setJwtValidator` do `SecurityConfig` passava-lhes ao lado (review r1).
+- Rajadas de pedidos em porta real (`PublicEndpointsAuth0HungHttpTest`): 250 `connect` simultâneos
+  excedem o backlog do Tomcat (`acceptCount` 100) e dão `ConnectException` no cliente (medido no
+  Windows); o teste espaça-os 2 ms.
+- Testes que podem pendurar (rede) usam `assertTimeoutPreemptively`: sem o read timeout, falham
+  com mensagem em vez de pendurar a suite.
 - `JwtDecoder` de teste = `@Bean @Primary` com outro nome (`TestJwtDecoderConfig`). O Spring
   Boot 4 desliga a sobreposição de beans: o mesmo nome dá `BeanDefinitionOverrideException`.
 - Spring Security 7 acrescenta sempre a authority `FACTOR_BEARER` a uma autenticação por
