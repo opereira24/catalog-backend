@@ -192,6 +192,17 @@ class PublicEndpointsHttpTest extends AbstractPostgresIntegrationTest {
 				send(request("/api/cars").method("DELETE", BodyPublishers.noBody())), 401, "Autenticacao necessaria", "/api/cars");
 	}
 
+	/**
+	 * Only health and info are public. The actuator endpoints live in their own handler mapping,
+	 * which {@code PublicSurfaceTest} does not see, so a public {@code /actuator/**} wildcard would
+	 * only show up here (review r1, S2): it would publish {@code env} or {@code heapdump} the day
+	 * they are exposed.
+	 */
+	@Test
+	void actuatorIndexNeedsAToken() throws Exception {
+		assertThat(send(get("/actuator")).statusCode()).isEqualTo(401);
+	}
+
 	/** {@code GET /error} asked for directly is a REQUEST dispatch, not an ERROR one: protected. */
 	@Test
 	void errorPageAskedForDirectlyNeedsAToken() throws Exception {
