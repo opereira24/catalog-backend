@@ -2,6 +2,7 @@ package pt.diamondcars.catalogbackend.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.containsStringIgnoringCase;
 import static org.hamcrest.Matchers.startsWith;
@@ -27,8 +28,9 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.security.oauth2.jwt.BadJwtException;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
-import org.springframework.security.oauth2.jwt.JwtDecoderInitializationException;
+import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.test.web.servlet.MockMvc;
+import pt.diamondcars.catalogbackend.config.support.FakeAuth0;
 import pt.diamondcars.catalogbackend.config.support.SecurityProbeConfig;
 import pt.diamondcars.catalogbackend.config.support.TestJwtSupport;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
@@ -92,9 +94,9 @@ class UnconfiguredAuth0Test extends AbstractPostgresIntegrationTest {
 	/**
 	 * Accepting tokens without checking {@code aud} would let in tokens issued for other APIs of
 	 * the tenant. The issuer is a closed local port on purpose: if this branch ever built a real
-	 * decoder, the discovery would fail with {@link JwtDecoderInitializationException} instead of
-	 * {@link BadJwtException}, and no test could reach a real tenant (an earlier version of this
-	 * test used the production issuer and a mutant that dropped the audience check survived).
+	 * decoder, the token would be rejected for another reason (HS256 is not accepted) with another
+	 * message, and no test could reach a real tenant (an earlier version of this test used the
+	 * production issuer and a mutant that dropped the audience check survived).
 	 */
 	@Test
 	void issuerWithoutAudienceAlsoRejectsEveryTokenWithoutNetwork() throws Exception {
@@ -110,20 +112,33 @@ class UnconfiguredAuth0Test extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * A server that accepts the connection and never answers stands for a hung Auth0: the OIDC
-	 * discovery gives up after the 3 s read timeout instead of holding the request thread forever.
+	 * A server that accepts the connection and never answers stands for a hung Auth0: the JWKS
+	 * fetch gives up after the 3 s read timeout instead of holding the request thread forever, and
+	 * the request fails as a server error (500), not as an invalid token. Preemptive timeout (review
+	 * r1, S3): without the read timeout this test fails after 10 s instead of hanging the suite.
 	 */
 	@Test
-	void hungAuth0FailsFastWithInitializationError() throws Exception {
+	void hungAuth0FailsWithinTheReadTimeout() throws Exception {
 		try (ServerSocket silentServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
 			String issuer = "http://127.0.0.1:" + silentServer.getLocalPort() + "/";
 			JwtDecoder decoder = new SecurityConfig().jwtDecoder(issuer, "https://oteustand.pt/api");
+			String rs256Token;
+			try (FakeAuth0 otherTenant = FakeAuth0.start()) {
+				rs256Token = otherTenant.token(List.of("admin"));
+			}
 
-			long start = System.nanoTime();
-			assertThatThrownBy(() -> decoder.decode(FORGED_ADMIN_TOKEN)).isInstanceOf(JwtDecoderInitializationException.class);
-			Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
+			Duration elapsed =
+					assertTimeoutPreemptively(
+							Duration.ofSeconds(10),
+							() -> {
+								long start = System.nanoTime();
+								assertThatThrownBy(() -> decoder.decode(rs256Token))
+										.isInstanceOf(JwtException.class)
+										.isNotInstanceOf(BadJwtException.class);
+								return Duration.ofNanos(System.nanoTime() - start);
+							});
 
-			assertThat(elapsed).isGreaterThanOrEqualTo(SecurityConfig.AUTH0_TIMEOUT.minusMillis(500)).isLessThan(Duration.ofSeconds(10));
+			assertThat(elapsed).isGreaterThanOrEqualTo(SecurityConfig.AUTH0_TIMEOUT.minusMillis(500));
 		}
 	}
 }
