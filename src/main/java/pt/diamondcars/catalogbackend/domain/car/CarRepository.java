@@ -6,13 +6,15 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Query;
 
 /**
  * Spring Data repository for {@link Car}: the derived queries the public catalog uses, plus the
  * ones {@code dcbo-backend}'s back-office services call (ported by TASK-001, only the methods
  * with a production caller), plus {@link JpaSpecificationExecutor} so {@code CarQueryService} can
  * compose the optional filters {@code GET /api/cars} accepts without one derived-query method per
- * combination.
+ * combination, plus the advisory lock the back-office highlight limit takes ({@link
+ * #lockHighlightSlots()}, TASK-003).
  */
 public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificationExecutor<Car> {
 
@@ -97,4 +99,26 @@ public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificatio
 	 * @return {@code true} if at least one car has this {@code partner_id}
 	 */
 	boolean existsByPartnerId(UUID partnerId);
+
+	/**
+	 * Takes the transaction-scoped PostgreSQL advisory lock that serialises "turn a car's highlight
+	 * on" (TASK-003, AC E.2). Must be called inside a transaction, before {@link
+	 * #countByDestaqueTrue()} and before any write of that transaction; PostgreSQL releases it on
+	 * commit or rollback.
+	 *
+	 * <p>Without it, two requests that each count 7 featured cars both feature one more (count, then
+	 * save): measured 10 featured cars with 3 concurrent requests, and 9 out of 9 from zero. An
+	 * optimistic {@code @Version} on {@code Car} does not help (different rows), and {@code SELECT
+	 * ... FOR UPDATE} of the featured cars fails from zero (no row to lock). With this lock, the count after it runs in
+	 * a new {@code READ COMMITTED} snapshot and sees the highlight the previous holder committed.
+	 *
+	 * <p>Two {@code int4} keys on purpose: that key space never collides with the single {@code
+	 * bigint} key Flyway locks at startup.
+	 *
+	 * @return always 1 (a native query has to return something; the lock is the point)
+	 */
+	@Query(
+			value = "SELECT 1 FROM pg_advisory_xact_lock(hashtext('catalog-backend'), hashtext('cars.destaque'))",
+			nativeQuery = true)
+	int lockHighlightSlots();
 }
