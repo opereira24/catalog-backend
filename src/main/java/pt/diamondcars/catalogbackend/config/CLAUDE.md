@@ -15,7 +15,8 @@ está no teste indicado.
 - **Armadilha para o back-office**: um `GET /api/cars/<um segmento>` novo (ex.
   `/api/cars/stats`) fica público por cair em `/api/cars/{id}`. `PublicSurfaceTest` percorre
   todos os mapeamentos do `RequestMappingHandlerMapping` e falha se o conjunto público mudar.
-  Rotas do back-office vivem noutro espaço de caminhos; nunca `POST /api/leads`.
+  Rotas do back-office vivem noutro espaço de caminhos; nunca `POST /api/leads`. Esse espaço é
+  `/api/backoffice` (TASK-003), guardado por `BackOfficeSurfaceTest`: ver `../web/CLAUDE.md`.
 
 ## Porque é que o despacho `ERROR` é `permitAll()`
 
