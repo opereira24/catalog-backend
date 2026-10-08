@@ -119,11 +119,10 @@ class Auth0JwtDecoderTest {
 		assertThat(auth0.jwksRequests()).isZero();
 	}
 
+	/** The issuer always ends in a slash ({@link Auth0Issuer}): it is the {@code iss} Auth0 emits. */
 	@Test
-	void jwksUrlFollowsAuth0WithOrWithoutTrailingSlash() {
+	void jwksUrlIsWhereAuth0PublishesIt() {
 		assertThat(Auth0JwkSource.jwkSetUrl("https://oteustand.eu.auth0.com/"))
-				.hasToString("https://oteustand.eu.auth0.com/.well-known/jwks.json");
-		assertThat(Auth0JwkSource.jwkSetUrl("https://oteustand.eu.auth0.com"))
 				.hasToString("https://oteustand.eu.auth0.com/.well-known/jwks.json");
 	}
 

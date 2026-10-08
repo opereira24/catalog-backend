@@ -6,7 +6,6 @@ import com.nimbusds.jose.jwk.JWKSelector;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
-import com.nimbusds.jose.util.DefaultResourceRetriever;
 import com.nimbusds.jose.util.ResourceRetriever;
 import java.net.MalformedURLException;
 import java.net.URI;
@@ -31,9 +30,9 @@ import org.slf4j.LoggerFactory;
  * failure, so concurrent requests queue for 3 s each; its JWKS source locks on every lookup and
  * fetches the JWKS again for every unknown {@code kid}. Nimbus' {@code CachingJWKSetSource} lets an
  * unbounded number of requests wait for an in-flight fetch, and reports a rate-limited unknown
- * {@code kid} as an unavailable key source (500) instead of an invalid token (401). The fetch itself
- * (HTTP with timeouts, size limit, parsing) is Nimbus' {@link DefaultResourceRetriever} and {@link
- * JWKSet#parse(String)}.
+ * {@code kid} as an unavailable key source (500) instead of an invalid token (401). The fetch is
+ * {@link DeadlineResourceRetriever} (a limit on the whole fetch, not only on each read, and on its
+ * size) and the parsing Nimbus' {@link JWKSet#parse(String)}.
  *
  * <p>Rules, in the order a lookup applies them:
  *
@@ -59,14 +58,17 @@ final class Auth0JwkSource implements JWKSource<SecurityContext> {
 
 	private static final Logger log = LoggerFactory.getLogger(Auth0JwkSource.class);
 
+	// Production limits. Private on purpose: the tests state them as literals (review r2, S-e), so
+	// changing one of them breaks a test instead of moving the test along with it.
+
 	/** Minimum time between the end of one JWKS fetch attempt and the start of the next. */
-	static final Duration MIN_FETCH_INTERVAL = Duration.ofSeconds(10);
+	private static final Duration MIN_FETCH_INTERVAL = Duration.ofSeconds(10);
 
 	/** Age after which cached keys are refreshed in the background (Nimbus' default cache life). */
-	static final Duration KEYS_TIME_TO_LIVE = Duration.ofMinutes(5);
+	private static final Duration KEYS_TIME_TO_LIVE = Duration.ofMinutes(5);
 
 	/** How many requests may wait for an in-flight fetch; the others never block. */
-	static final int MAX_WAITING_REQUESTS = 8;
+	private static final int MAX_WAITING_REQUESTS = 8;
 
 	/** Upper bound of a JWKS response, Nimbus' default; Auth0's is about 2 KB. */
 	private static final int JWKS_SIZE_LIMIT_BYTES = 50 * 1024;
@@ -112,38 +114,54 @@ final class Auth0JwkSource implements JWKSource<SecurityContext> {
 
 	/**
 	 * The production source for an Auth0 tenant: the JWKS at {@code <issuer>.well-known/jwks.json}
-	 * (where Auth0 always publishes it, so no OIDC discovery round trip), fetched with {@code
-	 * timeout} as connect and as read timeout. A request waits for an in-flight fetch at most as long
-	 * as that fetch can take (connect plus read).
+	 * (where Auth0 always publishes it, so no OIDC discovery round trip). The connection and the
+	 * response headers must arrive within {@code timeout}, the whole response within twice that, and
+	 * a request waits for an in-flight fetch at most as long, so neither the request that fetches
+	 * nor the ones that wait for it are held longer than {@code 2 x timeout}.
 	 *
-	 * @param issuerUri the tenant's issuer, e.g. {@code https://oteustand.eu.auth0.com/}
-	 * @param timeout connect and read timeout of the fetch
+	 * @param issuerUri the tenant's issuer as {@link Auth0Issuer} accepts it, e.g. {@code
+	 *     https://oteustand.eu.auth0.com/}
+	 * @param timeout limit for the connection and the response headers; half the limit of a fetch
 	 * @return the source; nothing is fetched until the first token needs a key
 	 */
 	static Auth0JwkSource forIssuer(String issuerUri, Duration timeout) {
-		int timeoutMillis = Math.toIntExact(timeout.toMillis());
-		return new Auth0JwkSource(
-				jwkSetUrl(issuerUri),
-				new DefaultResourceRetriever(timeoutMillis, timeoutMillis, JWKS_SIZE_LIMIT_BYTES),
-				MIN_FETCH_INTERVAL,
-				KEYS_TIME_TO_LIVE,
-				MAX_WAITING_REQUESTS,
-				timeout.multipliedBy(2),
-				System::nanoTime);
+		return forIssuer(issuerUri, timeout, System::nanoTime);
 	}
 
 	/**
-	 * {@code <issuer>/.well-known/jwks.json}, with or without a trailing slash on the issuer.
+	 * {@link #forIssuer(String, Duration)} with another clock, so the tests run the production
+	 * limits without sleeping through them.
 	 *
-	 * @param issuerUri the issuer
+	 * @param issuerUri the tenant's issuer as {@link Auth0Issuer} accepts it
+	 * @param timeout limit for the connection and the response headers; half the limit of a fetch
+	 * @param nanoClock monotonic clock in nanoseconds
+	 * @return the source
+	 */
+	static Auth0JwkSource forIssuer(String issuerUri, Duration timeout, LongSupplier nanoClock) {
+		Duration fetchDeadline = timeout.multipliedBy(2);
+		return new Auth0JwkSource(
+				jwkSetUrl(issuerUri),
+				new DeadlineResourceRetriever(timeout, fetchDeadline, JWKS_SIZE_LIMIT_BYTES),
+				MIN_FETCH_INTERVAL,
+				KEYS_TIME_TO_LIVE,
+				MAX_WAITING_REQUESTS,
+				fetchDeadline,
+				nanoClock);
+	}
+
+	/**
+	 * {@code <issuer>.well-known/jwks.json}.
+	 *
+	 * @param issuerUri the issuer as {@link Auth0Issuer} accepts it (with the trailing slash);
+	 *     {@code SecurityConfig#jwtDecoder} never gets here with any other value
 	 * @return the JWKS URL
+	 * @throws IllegalArgumentException if {@code issuerUri} is not a URL (a programming error)
 	 */
 	static URL jwkSetUrl(String issuerUri) {
-		String base = issuerUri.endsWith("/") ? issuerUri : issuerUri + "/";
 		try {
-			return URI.create(base + ".well-known/jwks.json").toURL();
+			return URI.create(issuerUri + ".well-known/jwks.json").toURL();
 		} catch (MalformedURLException | IllegalArgumentException e) {
-			throw new IllegalArgumentException("AUTH0_ISSUER_URI invalido: " + issuerUri, e);
+			throw new IllegalArgumentException("Issuer nao validado: " + Auth0Issuer.forLog(issuerUri), e);
 		}
 	}
 

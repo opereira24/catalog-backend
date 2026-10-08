@@ -113,7 +113,7 @@ class UnconfiguredAuth0Test extends AbstractPostgresIntegrationTest {
 
 	/**
 	 * A server that accepts the connection and never answers stands for a hung Auth0: the JWKS
-	 * fetch gives up after the 3 s read timeout instead of holding the request thread forever, and
+	 * fetch gives up after the 3 s headers timeout instead of holding the request thread forever, and
 	 * the request fails as a server error (500), not as an invalid token. Preemptive timeout (review
 	 * r1, S3): without the read timeout this test fails after 10 s instead of hanging the suite.
 	 */
@@ -138,7 +138,8 @@ class UnconfiguredAuth0Test extends AbstractPostgresIntegrationTest {
 								return Duration.ofNanos(System.nanoTime() - start);
 							});
 
-			assertThat(elapsed).isGreaterThanOrEqualTo(SecurityConfig.AUTH0_TIMEOUT.minusMillis(500));
+			// the documented 3 s, as a literal (review r2, S-e)
+			assertThat(elapsed).isBetween(Duration.ofMillis(2_500), Duration.ofMillis(4_500));
 		}
 	}
 }

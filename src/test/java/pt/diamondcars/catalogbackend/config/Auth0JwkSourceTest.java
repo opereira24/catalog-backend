@@ -5,7 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import com.nimbusds.jose.jwk.RSAKey;
-import com.nimbusds.jose.util.DefaultResourceRetriever;
+import com.nimbusds.jose.jwk.JWKSet;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.time.Duration;
@@ -35,13 +35,27 @@ import pt.diamondcars.catalogbackend.config.support.FakeAuth0;
  * called.
  *
  * <p>Outcome classes: {@link BadJwtException} is a 401 (token invalid); any other {@link
- * JwtException} is a 500 (keys unavailable, the token may be valid). Most tests use a fake clock for
- * the 10 s interval and the 5 min key life, so nothing here sleeps through them.
+ * JwtException} is a 500 (keys unavailable, the token may be valid). Every source here is the
+ * production one ({@link Auth0JwkSource#forIssuer}); most tests give it a fake clock for the 10 s
+ * interval and the 5 min key life, so nothing here sleeps through them.
+ *
+ * <p>The production limits are written here as literals, never read from the class (review r2,
+ * S-e): a test that advanced the clock by {@code KEYS_TIME_TO_LIVE} passed just as well with a key
+ * life of 1000 days. Each limit is checked on both sides of its boundary.
  */
 @ExtendWith(OutputCaptureExtension.class)
 class Auth0JwkSourceTest {
 
 	private static final Duration FAST = Duration.ofMillis(500);
+
+	/** Documented minimum time between two fetch attempts (negative cache, rate limit). */
+	private static final Duration FETCH_INTERVAL = Duration.ofSeconds(10);
+
+	/** Documented key life: a key revoked in Auth0 is accepted for at most this long. */
+	private static final Duration KEY_LIFE = Duration.ofMinutes(5);
+
+	/** Documented largest JWKS accepted (Auth0's is about 2 KB). */
+	private static final int JWKS_SIZE_LIMIT = 51_200;
 
 	private final AtomicLong clock = new AtomicLong(1_000_000L);
 	private final ExecutorService pool = Executors.newFixedThreadPool(100);
@@ -60,9 +74,9 @@ class Auth0JwkSourceTest {
 
 	/**
 	 * The scenario of review r1: Auth0 accepts connections and never answers, before the keys were
-	 * ever fetched, and many requests arrive at once. One request fetches and gives up at the 3 s read
-	 * timeout, at most {@link Auth0JwkSource#MAX_WAITING_REQUESTS} wait for it, every other one gets
-	 * its 500 immediately; Auth0 is called once. Before the fix they queued for 3 s each.
+	 * ever fetched, and many requests arrive at once. One request fetches and gives up at the 3 s
+	 * headers timeout, exactly 8 wait for it, every other one gets its 500 immediately; Auth0 is
+	 * called once. Before the fix they queued for 3 s each.
 	 */
 	@Test
 	void hungAuth0BeforeTheFirstFetchHoldsOneFetchAndAFewWaiters() {
@@ -74,7 +88,7 @@ class Auth0JwkSourceTest {
 
 		assertThat(outcomes).allSatisfy(outcome -> assertThat(outcome.error()).isNotNull().isNotInstanceOf(BadJwtException.class));
 		long held = outcomes.stream().filter(outcome -> outcome.took().compareTo(Duration.ofSeconds(1)) > 0).count();
-		assertThat(held).isBetween(1L, 1L + Auth0JwkSource.MAX_WAITING_REQUESTS);
+		assertThat(held).as("the request that fetches and the 8 that may wait for it").isEqualTo(9L);
 		assertThat(outcomes).allSatisfy(outcome -> assertThat(outcome.took()).isLessThan(Duration.ofSeconds(8)));
 		assertThat(auth0.jwksRequests()).isEqualTo(1);
 
@@ -95,7 +109,11 @@ class Auth0JwkSourceTest {
 		assertThatThrownBy(() -> decoder.decode(token)).isNotInstanceOf(BadJwtException.class).isInstanceOf(JwtException.class);
 		assertThat(auth0.jwksRequests()).isEqualTo(1);
 
-		clock.addAndGet(Auth0JwkSource.MIN_FETCH_INTERVAL.toNanos());
+		clock.addAndGet(FETCH_INTERVAL.toNanos() - 1);
+		assertThatThrownBy(() -> decoder.decode(token)).isNotInstanceOf(BadJwtException.class).isInstanceOf(JwtException.class);
+		assertThat(auth0.jwksRequests()).as("1 ns before the interval").isEqualTo(1);
+
+		clock.addAndGet(1);
 		assertThat(decoder.decode(token).getSubject()).isEqualTo("auth0|tester");
 		assertThat(auth0.jwksRequests()).isEqualTo(2);
 	}
@@ -112,7 +130,7 @@ class Auth0JwkSourceTest {
 		assertThat(outcomes).allSatisfy(outcome -> assertThat(outcome.error()).isInstanceOf(BadJwtException.class));
 		assertThat(auth0.jwksRequests()).isEqualTo(1);
 
-		clock.addAndGet(Auth0JwkSource.MIN_FETCH_INTERVAL.toNanos());
+		clock.addAndGet(FETCH_INTERVAL.toNanos());
 		for (int i = 0; i < 50; i++) {
 			assertThatThrownBy(() -> decoder.decode(invented)).isInstanceOf(BadJwtException.class);
 		}
@@ -129,7 +147,7 @@ class Auth0JwkSourceTest {
 		String valid = auth0.token(List.of("admin"));
 		decoder.decode(valid);
 		auth0.hang();
-		clock.addAndGet(Auth0JwkSource.MIN_FETCH_INTERVAL.toNanos());
+		clock.addAndGet(FETCH_INTERVAL.toNanos());
 		String invented = auth0.token(FakeAuth0.newKey("invented"), claims -> {});
 		Future<Outcome> refreshing = pool.submit(() -> decodeTimed(decoder, invented));
 		awaitUntil(() -> auth0.jwksRequests() == 2);
@@ -143,7 +161,7 @@ class Auth0JwkSourceTest {
 		assertThat(decoder.decode(valid).getSubject()).as("last good keys kept during the outage").isEqualTo("auth0|tester");
 	}
 
-	/** A key revoked in Auth0 stops being accepted once the cached keys expire. */
+	/** A key revoked in Auth0 stops being accepted once the cached keys are 5 minutes old. */
 	@Test
 	void expiredKeysAreRefreshedInTheBackground() throws Exception {
 		JwtDecoder decoder = decoderWithFakeClock(FAST);
@@ -151,7 +169,13 @@ class Auth0JwkSourceTest {
 		decoder.decode(signedWithK1);
 		RSAKey k2 = FakeAuth0.newKey("k2");
 		auth0.publish(k2);
-		clock.addAndGet(Auth0JwkSource.KEYS_TIME_TO_LIVE.toNanos());
+
+		clock.addAndGet(KEY_LIFE.toNanos() - 1);
+		assertThat(decoder.decode(signedWithK1).getSubject()).isEqualTo("auth0|tester");
+		Thread.sleep(200);
+		assertThat(auth0.jwksRequests()).as("no refresh 1 ns before the key life").isEqualTo(1);
+
+		clock.addAndGet(1);
 
 		assertThat(decoder.decode(signedWithK1).getSubject()).as("served while the refresh runs").isEqualTo("auth0|tester");
 		awaitUntil(() -> rejected(decoder, signedWithK1));
@@ -174,13 +198,61 @@ class Auth0JwkSourceTest {
 		for (int i = 0; i < 50; i++) {
 			assertThatThrownBy(() -> decoder.decode(token)).isNotInstanceOf(BadJwtException.class);
 		}
-		clock.addAndGet(Auth0JwkSource.MIN_FETCH_INTERVAL.toNanos());
+		clock.addAndGet(FETCH_INTERVAL.toNanos());
 		assertThatThrownBy(() -> decoder.decode(token)).isNotInstanceOf(BadJwtException.class);
 
 		assertThat(output.getAll().lines().filter(line -> line.contains("JWKS do Auth0 indisponivel")))
 				.hasSize(2)
 				.allSatisfy(line -> assertThat(line).contains("WARN").contains("127.0.0.1:" + closedPort));
 		assertThat(output.getAll()).doesNotContain("\tat ");
+	}
+
+	/**
+	 * A JWKS larger than 50 KB is refused while it arrives (500, the keys could not be read); exactly
+	 * 50 KB is accepted. Without the limit a hostile or broken Auth0 could make the application read
+	 * a response of any size into memory (review r2 measured an 800 MB body cut at 51 200 bytes).
+	 */
+	@Test
+	void jwksOverTheSizeLimitIsRefused(CapturedOutput output) {
+		JwtDecoder decoder = decoderWithFakeClock(Duration.ofSeconds(2));
+		String token = auth0.token(List.of("admin"));
+		auth0.publishJson(paddedJwks(JWKS_SIZE_LIMIT + 1));
+
+		assertThatThrownBy(() -> decoder.decode(token)).isNotInstanceOf(BadJwtException.class).isInstanceOf(JwtException.class);
+		assertThat(output.getAll()).contains("JWKS maior do que o limite de " + JWKS_SIZE_LIMIT + " bytes");
+
+		auth0.publishJson(paddedJwks(JWKS_SIZE_LIMIT));
+		clock.addAndGet(FETCH_INTERVAL.toNanos());
+		assertThat(decoder.decode(token).getSubject()).isEqualTo("auth0|tester");
+		assertThat(auth0.jwksRequests()).isEqualTo(2);
+	}
+
+	/**
+	 * Review r2, S-a: a JWKS sent one byte every 2 s kept a fetch going for more than 25 s, because the
+	 * read timeout was per read. Each byte here arrives well inside the 3 s headers timeout; the
+	 * production fetch is still cut at its 6 s total and the request gets its 500. Without the total
+	 * limit this fetch would take about 100 s (one byte every 0.2 s).
+	 */
+	@Test
+	void jwksSentByteByByteIsCutAtTheFetchDeadline(CapturedOutput output) {
+		JwtDecoder decoder = productionDecoder();
+		String token = auth0.token(List.of("admin"));
+		auth0.drip(Duration.ofMillis(200));
+
+		Outcome outcome = assertTimeoutPreemptively(Duration.ofSeconds(15), () -> decodeTimed(decoder, token));
+
+		assertThat(outcome.error()).isNotNull().isNotInstanceOf(BadJwtException.class);
+		assertThat(outcome.took()).isBetween(Duration.ofMillis(5_500), Duration.ofMillis(7_500));
+		assertThat(output.getAll()).contains("prazo total de 6000 ms");
+		assertThat(auth0.jwksRequests()).isEqualTo(1);
+	}
+
+	private String paddedJwks(int bytes) {
+		String keys = new JWKSet(auth0.signingKey().toPublicJWK()).toString();
+		String padding = "x".repeat(bytes - keys.length() - "\"padding\":\"\",".length());
+		String json = "{\"padding\":\"" + padding + "\"," + keys.substring(1);
+		assertThat(json).hasSize(bytes);
+		return json;
 	}
 
 	private JwtDecoder productionDecoder() {
@@ -192,15 +264,7 @@ class Auth0JwkSourceTest {
 	}
 
 	private Auth0JwkSource source(String issuer, Duration timeout) {
-		int millis = Math.toIntExact(timeout.toMillis());
-		return new Auth0JwkSource(
-				Auth0JwkSource.jwkSetUrl(issuer),
-				new DefaultResourceRetriever(millis, millis, 50 * 1024),
-				Auth0JwkSource.MIN_FETCH_INTERVAL,
-				Auth0JwkSource.KEYS_TIME_TO_LIVE,
-				Auth0JwkSource.MAX_WAITING_REQUESTS,
-				timeout.multipliedBy(2),
-				clock::get);
+		return Auth0JwkSource.forIssuer(issuer, timeout, clock::get);
 	}
 
 	private List<Outcome> decodeConcurrently(JwtDecoder decoder, String token, int requests) throws Exception {
