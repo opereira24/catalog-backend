@@ -16,6 +16,14 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+  # Teto de pagina de todas as listagens com Pageable do back-office (TASK-003, AC D.2): ?size=1000
+  # devolve 100. Global e seguro para o publico: o PublicCarController nao recebe Pageable (o teto
+  # dele e o CarQueryService#MAX_PAGE_SIZE = 60).
+  data:
+    web:
+      pageable:
+        max-page-size: 100
+
 server:
   port: ${PORT:8081}
 
