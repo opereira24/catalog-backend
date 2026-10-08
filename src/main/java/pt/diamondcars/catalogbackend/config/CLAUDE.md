@@ -42,6 +42,17 @@ seria apanhado implicitamente pelo DSL e tirar a linha explícita não se notava
 - `AUTH0_ISSUER_URI` ou `AUTH0_AUDIENCE` vazio: o decoder lança `BadJwtException("Token
   invalido")` para qualquer token (401), sem rede, e há um `WARN` no arranque. A mensagem vai
   no `WWW-Authenticate`, por isso nunca diz que falta configuração.
+- **`AUTH0_ISSUER_URI` malformado nunca lança** (review r2: lançava na criação do bean e a
+  aplicação, site público incluído, não arrancava). `Auth0Issuer` só aceita a forma exata que o
+  Auth0 põe no `iss`: `https://<dominio>/`, minúsculas, **com a barra final**, sem porta, caminho,
+  query, fragmento nem credenciais (`http` só para `localhost`/`127.0.0.1`/`[::1]`, o `FakeAuth0`
+  dos testes). Qualquer outro valor dá o mesmo decoder que recusa tudo (401, zero rede) e **um**
+  `WARN` no arranque com o valor (entre aspas, só ASCII imprimível, cortado a 100 caracteres), o
+  problema e o formato esperado. O valor nunca é normalizado: a comparação com `iss` é exata
+  (`String.equals`), por isso sem a barra final todos os tokens dariam 401 em silêncio; é melhor
+  recusar com aviso. O "Domain" do painel do Auth0 (`oteustand.eu.auth0.com`) **não** serve tal
+  como está. Prova: `Auth0IssuerTest` (60+ valores), `MalformedAuth0IssuerTest` (decoder, aviso,
+  zero pedidos ao tenant), `MalformedAuth0IssuerContextTest` (aplicação inteira arranca).
 - **Nunca um issuer placeholder** (o `https://placeholder.auth0.com/` do `dcbo-backend`): um
   tenant Auth0 é de quem o registar primeiro, e esse terceiro passava a emitir tokens aceites;
   um tenant inexistente prendia cada pedido à espera de rede (o arquiteto mediu um `curl` a
@@ -75,12 +86,22 @@ limitado por rate limit. Regras do `Auth0JwkSource`, cada uma com teste em `Auth
 
 - `kid` conhecido: memória, sem lock, sem rede, mesmo com o Auth0 em baixo (as últimas chaves boas
   ficam até um fetch ter sucesso).
-- Sem chaves ou `kid` desconhecido: um só pedido vai ao Auth0 (3 s connect + 3 s read), no máximo 8
-  esperam por ele (até 6 s), os restantes respondem logo. Nunca mais de 9 threads do Tomcat presas
-  pelo Auth0, seja qual for o número de pedidos.
+- Sem chaves ou `kid` desconhecido: um só pedido vai ao Auth0, no máximo 8 esperam por ele (até
+  6 s), os restantes respondem logo. Nunca mais de 9 threads do Tomcat presas pelo Auth0, e nunca
+  mais de 6 s cada, seja qual for o número de pedidos.
+- O fetch (`DeadlineResourceRetriever`, `HttpClient` do JDK): ligação e cabeçalhos em 3 s
+  (`AUTH0_TIMEOUT`), resposta completa em 6 s, corpo até 50 KB contado enquanto chega, só `2xx`,
+  sem seguir redirecionamentos. **Não usar `HttpURLConnection`** (o `DefaultResourceRetriever` do
+  Nimbus) para isto: o read timeout é por leitura (um JWKS a 1 byte cada 2 s prendeu o fetch mais
+  de 25 s, review r2), e `disconnect()` noutra thread não o corta enquanto os cabeçalhos chegam (no
+  JDK 21 espera pelo mesmo lock que a thread que lê; medido). O `timeout` do `HttpRequest` inclui a
+  ligação (medido: endereço não encaminhável falha ao fim do timeout) e o `cancel(true)` do
+  `sendAsync` fecha a ligação (o servidor vê o reset na escrita seguinte).
 - Intervalo mínimo de 10 s entre tentativas (contado do fim da anterior): é a cache negativa depois
   de uma falha e o limite para `kid` inventados (no máximo um fetch por intervalo). Quando o Auth0
-  volta, o admin passa no máximo 10 s depois.
+  volta, o primeiro pedido depois do intervalo vai buscar as chaves: no pior caso **até ~16 s**
+  depois (uma tentativa em curso pode durar até 6 s, e o intervalo conta do fim dela; com o Auth0
+  mudo a tentativa acaba aos 3 s, ~13 s; review r2 mediu 13-16 s).
 - Chaves com mais de 5 min: renovadas numa virtual thread, o pedido não espera. Uma chave revogada
   no Auth0 deixa de ser aceite até 5 min depois.
 - Resposta: chave encontrada; nenhuma (401) se as chaves são atuais; `KeySourceException` (500) se
@@ -123,16 +144,29 @@ o bean mude de nome ou apareça um segundo.
 
 - `@SpringBootTest` sem `AUTH0_*` (o default) nunca faz rede. Testes que precisem de um issuer
   usam `config/support/FakeAuth0` (tenant em processo: JWKS com chaves RSA geradas, tokens RS256,
-  contador de pedidos, `hang()`), uma porta local fechada ou um `ServerSocket` que nunca responde,
-  nunca um host real: um host real esconde mutantes (o decode vai à rede e falha por outro motivo).
+  `hang()`, `drip()`, `publishJson()`), uma porta local fechada ou um `ServerSocket` que nunca
+  responde, nunca um host real: um host real esconde mutantes (o decode vai à rede e falha por outro
+  motivo).
+- O `FakeAuth0` serve também a descoberta OIDC (e pendura-a como o JWKS) e conta pedidos de
+  qualquer tipo (`requests()`): sem isso, um decoder que voltasse à descoberta recebia 404 depressa
+  e o teste de Auth0 pendurado falhava por outro motivo (review r2, S-d). Para "zero chamadas ao
+  Auth0", afirmar `requests()`, não `jwksRequests()`.
+- **Limites de segurança afirmados com literais** (10 s, 5 min, 8, 50 KB, 3 s/6 s), dos dois lados
+  da fronteira, sobre a fonte de produção (`Auth0JwkSource.forIssuer` com relógio falso). Os
+  limites são `private` de propósito: um teste que avançava o relógio pela própria constante
+  continuava verde com uma vida de chaves de 1000 dias (review r2, S-e).
 - O decoder de produção só é provado por `Auth0JwtDecoderTest` (tokens RS256 do `FakeAuth0`): o
   decoder HMAC de teste dos outros testes tem o seu próprio validador de `aud`, e por isso apagar
   `setJwtValidator` do `SecurityConfig` passava-lhes ao lado (review r1).
 - Rajadas de pedidos em porta real (`PublicEndpointsAuth0HungHttpTest`): 250 `connect` simultâneos
   excedem o backlog do Tomcat (`acceptCount` 100) e dão `ConnectException` no cliente (medido no
   Windows); o teste espaça-os 2 ms.
-- Testes que podem pendurar (rede) usam `assertTimeoutPreemptively`: sem o read timeout, falham
-  com mensagem em vez de pendurar a suite.
+- Testes que podem pendurar (rede) usam `assertTimeoutPreemptively`: sem os limites do fetch,
+  falham com mensagem em vez de pendurar a suite.
+- `OutputCaptureExtension` num `@SpringBootTest` com propriedades só dessa classe apanha também o
+  log do arranque do contexto (é criado depois do `beforeAll` da captura): é assim que
+  `MalformedAuth0IssuerContextTest` prova "um só `WARN`, no arranque". Com um contexto em cache,
+  partilhado com outra classe, o arranque não aparece.
 - `JwtDecoder` de teste = `@Bean @Primary` com outro nome (`TestJwtDecoderConfig`). O Spring
   Boot 4 desliga a sobreposição de beans: o mesmo nome dá `BeanDefinitionOverrideException`.
 - Spring Security 7 acrescenta sempre a authority `FACTOR_BEARER` a uma autenticação por
