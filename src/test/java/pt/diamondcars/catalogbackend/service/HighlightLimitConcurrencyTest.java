@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import pt.diamondcars.catalogbackend.domain.car.Car;
 import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
@@ -39,9 +40,14 @@ import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededExcepti
  * all of them write; with it they queue on the lock and each count sees the previous commit.
  *
  * <p>Own context with a pool of 20: 9 workers, the gate and the polling query do not fit in the
- * default 10.
+ * default 10. {@link DirtiesContext} closes it (and its 20 connections) right after this class:
+ * the test container has PostgreSQL's default {@code max_connections} (100, 3 reserved), every
+ * cached context keeps its pool open (Hikari fills it to the maximum), and the suite already has 9
+ * contexts of 10. Kept cached, this one made the 10th context fail with {@code FATAL: sorry, too
+ * many clients already} (measured in {@code mvnw clean verify}).
  */
 @SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=20")
+@DirtiesContext
 class HighlightLimitConcurrencyTest extends AbstractPostgresIntegrationTest {
 
 	private static final Duration ALL_WAITING_DEADLINE = Duration.ofSeconds(20);

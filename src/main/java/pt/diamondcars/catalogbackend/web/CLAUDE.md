@@ -124,6 +124,11 @@ escrever" numa tabela:
 
 Sem sleeps nem repetição: o resultado é o mesmo em todas as corridas. Precisa de pool maior que
 o default de 10 (workers + portão + a query de espera): contexto próprio com
-`spring.datasource.hikari.maximum-pool-size=20`. A escrita de cada worker tem de acontecer
+`spring.datasource.hikari.maximum-pool-size=20` **e `@DirtiesContext`**. O contentor de teste tem
+o `max_connections` por omissão do PostgreSQL (100, 3 reservadas) e cada contexto em cache segura
+o pool cheio (o Hikari enche-o até ao máximo); a suite já tem 9 contextos de 10 ligações. Sem o
+`@DirtiesContext`, o contexto de 20 ficava em cache e o 10.º contexto falhava a arrancar com
+`FATAL: sorry, too many clients already` (medido no `mvnw clean verify`). Um contexto novo (outras
+propriedades, `@Import`, `@MockitoBean`) custa 10 ligações enquanto a JVM viver. A escrita de cada worker tem de acontecer
 **depois** da decisão (aqui `saveAndFlush` no fim do método); se o código escrever antes de
 decidir, o portão prende-o antes da decisão e o teste deixa de provar a corrida.
