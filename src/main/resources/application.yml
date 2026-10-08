@@ -24,6 +24,17 @@ server:
 app:
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+  # Resource server JWT do Auth0 (TASK-002), lido por config/SecurityConfig e Auth0RolesConverter.
+  # Nunca em spring.security.oauth2.resourceserver: o JwtDecoder e declarado no SecurityConfig.
+  # issuer-uri e audience ficam VAZIOS por omissao, de proposito: sem os dois, o decoder recusa
+  # todos os tokens (401, zero rede, WARN no arranque). Nunca um placeholder como
+  # https://placeholder.auth0.com/: um tenant Auth0 e de quem o registar primeiro, e esse terceiro
+  # passava a emitir tokens que este servico aceitava. roles-claim tem o default de producao (nome
+  # fixo pela Action do tenant, nao e segredo; so e lido de tokens ja validados).
+  auth0:
+    issuer-uri: ${AUTH0_ISSUER_URI:}
+    audience: ${AUTH0_AUDIENCE:}
+    roles-claim: ${AUTH0_ROLES_CLAIM:https://oteustand.pt/roles}
   leads:
     rate-limit:
       max-requests: ${LEADS_RATE_LIMIT_MAX_REQUESTS:5}
