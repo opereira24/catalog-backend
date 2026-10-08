@@ -3,6 +3,7 @@ package pt.diamondcars.catalogbackend.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -949,7 +950,7 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 		mockMvc
 				.perform(postJson("/api/backoffice/cars", body).with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.startsWith(field + ": ")));
+				.andExpect(jsonPath("$.message").value(startsWith(field + ": ")));
 		assertThat(carRepository.count()).isZero();
 	}
 
@@ -1160,7 +1161,7 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{}"))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.startsWith("destaque: ")));
+				.andExpect(jsonPath("$.message").value(startsWith("destaque: ")));
 		assertThat(carRepository.findById(car.getId()).orElseThrow().isDestaque()).isTrue();
 	}
 
