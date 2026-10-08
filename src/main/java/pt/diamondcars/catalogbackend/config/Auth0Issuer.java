@@ -92,6 +92,9 @@ final class Auth0Issuer {
 		if (issuerUri.chars().anyMatch(c -> c <= 0x20 || c > 0x7e)) {
 			return "tem espacos, acentos ou caracteres de controlo";
 		}
+		if (issuerUri.matches("[\"'].*|.*[\"']")) {
+			return "tem aspas, e o valor vai sem elas";
+		}
 		int schemeEnd = issuerUri.indexOf("://");
 		if (schemeEnd < 0) {
 			return "falta o esquema https://";

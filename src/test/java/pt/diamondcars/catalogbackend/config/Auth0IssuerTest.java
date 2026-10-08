@@ -78,7 +78,12 @@ class Auth0IssuerTest {
 				Arguments.of("https://oteustand.eu.auth0.com/\t", whitespace),
 				Arguments.of("https://otéustand.eu.auth0.com/", whitespace),
 				Arguments.of("https://oteustand.eu.auth0.com/\u0000", whitespace),
+				// the next value has a non-breaking space (U+00A0) on each side, as pasted from a web page
 				Arguments.of("\"https://oteustand.eu.auth0.com/\"".replace('"', ' '), whitespace),
+				// quotes copied along with the value
+				Arguments.of("\"https://oteustand.eu.auth0.com/\"", "tem aspas"),
+				Arguments.of("'https://oteustand.eu.auth0.com/'", "tem aspas"),
+				Arguments.of("https://oteustand.eu.auth0.com/\"", "tem aspas"),
 				// case: the comparison with iss is exact
 				Arguments.of("HTTPS://oteustand.eu.auth0.com/", uppercase),
 				Arguments.of("https://OTEUSTAND.eu.auth0.com/", uppercase),
