@@ -6,6 +6,7 @@ import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -72,7 +73,11 @@ public class SecurityConfig {
 	 * WWW-Authenticate}, so it must not reveal that the configuration is missing. */
 	static final String INVALID_TOKEN_MESSAGE = "Token invalido";
 
-	/** Connect and read timeout of the JWKS fetch from Auth0 (the only call made to Auth0). */
+	/**
+	 * Limit for connecting to Auth0 and receiving the response headers of the JWKS fetch (the only
+	 * call made to Auth0); the whole fetch, body included, is limited to twice this ({@link
+	 * Auth0JwkSource#forIssuer(String, Duration)}).
+	 */
 	static final Duration AUTH0_TIMEOUT = Duration.ofSeconds(3);
 
 	/**
@@ -161,10 +166,16 @@ public class SecurityConfig {
 	 *       {@link BadJwtException} (so 401), never calls the network, and one {@code WARN} at
 	 *       startup. Issuer without audience is rejected too: skipping the {@code aud} check would
 	 *       accept any token of the tenant issued for another API.
+	 *   <li>{@code issuerUri} not in the form Auth0 puts in {@code iss} ({@link Auth0Issuer}, e.g.
+	 *       the bare domain the Auth0 dashboard shows, or no trailing slash): the same decoder, and
+	 *       one {@code WARN} that names the problem. Never an exception: a typo in this variable must
+	 *       not stop the application, and with it the public site, from starting (review r2,
+	 *       IMPORTANTE 1).
 	 *   <li>Both set: {@link #auth0JwtDecoder(JWKSource, String, String)} over {@link
 	 *       Auth0JwkSource#forIssuer(String, Duration)}. Nothing is fetched at startup; the JWKS is
-	 *       fetched with {@link #AUTH0_TIMEOUT} connect and read timeouts when the first token needs a
-	 *       key, and the source bounds how many requests a slow Auth0 can hold (see its Javadoc).
+	 *       fetched when the first token needs a key, within {@link #AUTH0_TIMEOUT} up to the response
+	 *       headers and twice that in total, and the source bounds how many requests a slow Auth0 can
+	 *       hold (see its Javadoc).
 	 *       If the keys cannot be fetched the request ends in 500 (see {@link
 	 *       #bearerAuthenticationFailureHandler(AuthenticationEntryPoint)}), deliberately not 401:
 	 *       the token may be valid and a 401 would make the back-office end the user's session over a
@@ -182,11 +193,30 @@ public class SecurityConfig {
 			log.warn(
 					"AUTH0_ISSUER_URI e/ou AUTH0_AUDIENCE em falta: todos os tokens sao recusados e todos os "
 							+ "endpoints protegidos respondem 401 (os publicos nao sao afetados)");
-			return token -> {
-				throw new BadJwtException(INVALID_TOKEN_MESSAGE);
-			};
+			return rejectEveryToken();
+		}
+		Optional<String> issuerProblem = Auth0Issuer.problem(issuerUri);
+		if (issuerProblem.isPresent()) {
+			log.warn(
+					"AUTH0_ISSUER_URI invalido, {}: {}. Formato esperado: https://<dominio do tenant>/, p. ex. {} "
+							+ "(com a barra final). Todos os tokens sao recusados e todos os endpoints protegidos "
+							+ "respondem 401 (os publicos nao sao afetados)",
+					Auth0Issuer.forLog(issuerUri),
+					issuerProblem.get(),
+					Auth0Issuer.EXAMPLE);
+			return rejectEveryToken();
 		}
 		return auth0JwtDecoder(Auth0JwkSource.forIssuer(issuerUri, AUTH0_TIMEOUT), issuerUri, audience);
+	}
+
+	/**
+	 * The decoder used while Auth0 is not (correctly) configured: every token is rejected with
+	 * {@link BadJwtException} (401) and the network is never called.
+	 */
+	private static JwtDecoder rejectEveryToken() {
+		return token -> {
+			throw new BadJwtException(INVALID_TOKEN_MESSAGE);
+		};
 	}
 
 	/**

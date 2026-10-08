@@ -33,6 +33,11 @@ import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
  * measured 250 such requests putting {@code GET /api/cars} into 30 s timeouts: the requests queued
  * for 3 s each behind the OIDC discovery. Now one request waits for Auth0, a few wait for it, the
  * rest get their 500 at once, and the public site keeps answering in well under a second.
+ *
+ * <p>The tenant hangs every path, OIDC discovery included, and the test waits for the first request
+ * of any kind: run against the code of review r1 (discovery first), it fails where it should, on
+ * {@code GET /api/cars} timing out, and not on a 404 from a tenant that only knew the JWKS (review
+ * r2, S-d).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(SecurityProbeConfig.class)
@@ -76,7 +81,7 @@ class PublicEndpointsAuth0HungHttpTest extends AbstractPostgresIntegrationTest {
 						flood.add(pool.submit(() -> status(SecurityProbeConfig.PROBE_PATH, token)));
 						Thread.sleep(2);
 					}
-					while (AUTH0.jwksRequests() == 0) {
+					while (AUTH0.requests() == 0) {
 						Thread.sleep(10);
 					}
 					for (int i = 0; i < 5; i++) {
@@ -92,6 +97,7 @@ class PublicEndpointsAuth0HungHttpTest extends AbstractPostgresIntegrationTest {
 							.isLessThan(Duration.ofSeconds(12));
 				});
 
+		assertThat(AUTH0.requests()).as("requests of any kind to the tenant").isEqualTo(1);
 		assertThat(AUTH0.jwksRequests()).isEqualTo(1);
 		assertThat(output.getAll().lines().filter(line -> line.contains("JWKS do Auth0 indisponivel"))).hasSize(1);
 		assertThat(output.getAll()).doesNotContain("\tat ");

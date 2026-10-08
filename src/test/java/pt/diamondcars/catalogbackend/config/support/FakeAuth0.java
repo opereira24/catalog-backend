@@ -33,9 +33,14 @@ import java.util.function.Consumer;
 
 /**
  * An Auth0 tenant in the test JVM: an HTTP server on a free loopback port that publishes a JWKS at
- * {@code /.well-known/jwks.json} (where Auth0 publishes it) with locally generated RSA keys, signs
- * RS256 tokens like Auth0 does, counts the JWKS requests and can hang them to stand for a slow
- * Auth0. Nothing leaves the machine.
+ * {@code /.well-known/jwks.json} (where Auth0 publishes it) with locally generated RSA keys, and the
+ * OIDC discovery document at {@code /.well-known/openid-configuration}, signs RS256 tokens like
+ * Auth0 does, counts the requests and can hang them, or send the JWKS one byte at a time, to stand
+ * for a slow or hostile Auth0. Nothing leaves the machine.
+ *
+ * <p>The discovery document is served (and hangs) like the JWKS even though the production decoder
+ * never asks for it: a decoder that went back to OIDC discovery must meet the same slow Auth0, not a
+ * fast 404 (review r2, S-d).
  */
 public final class FakeAuth0 implements AutoCloseable {
 
@@ -45,9 +50,11 @@ public final class FakeAuth0 implements AutoCloseable {
 	private final HttpServer server;
 	private final ExecutorService executor = Executors.newCachedThreadPool();
 	private final AtomicInteger jwksRequests = new AtomicInteger();
+	private final AtomicInteger requests = new AtomicInteger();
 	private final RSAKey signingKey = newKey("k1");
-	private volatile List<JWK> published = List.of(signingKey.toPublicJWK());
+	private volatile String publishedJson = new JWKSet(signingKey.toPublicJWK()).toString();
 	private volatile CountDownLatch hang;
+	private volatile Duration drip;
 
 	private FakeAuth0() {
 		try {
@@ -56,7 +63,9 @@ public final class FakeAuth0 implements AutoCloseable {
 			throw new UncheckedIOException(e);
 		}
 		server.setExecutor(executor);
+		server.createContext("/", this::serveNotFound);
 		server.createContext("/.well-known/jwks.json", this::serveJwks);
+		server.createContext("/.well-known/openid-configuration", this::serveDiscovery);
 		server.start();
 	}
 
@@ -98,13 +107,38 @@ public final class FakeAuth0 implements AutoCloseable {
 		return jwksRequests.get();
 	}
 
+	/** @return how many requests of any kind (JWKS, discovery, any other path) reached the tenant */
+	public int requests() {
+		return requests.get();
+	}
+
 	/**
 	 * Replaces the published keys (public parts only).
 	 *
 	 * @param keys the new JWKS content
 	 */
 	public void publish(RSAKey... keys) {
-		published = Arrays.stream(keys).map(key -> (JWK) key.toPublicJWK()).toList();
+		publishJson(new JWKSet(Arrays.stream(keys).map(key -> (JWK) key.toPublicJWK()).toList()).toString());
+	}
+
+	/**
+	 * Serves {@code json} as the JWKS, byte for byte (e.g. a JWKS padded to a given size).
+	 *
+	 * @param json the response body of {@code /.well-known/jwks.json}
+	 */
+	public void publishJson(String json) {
+		publishedJson = json;
+	}
+
+	/**
+	 * From now on the JWKS is sent one byte every {@code interval}, after the headers: each read of
+	 * the client gets a byte well inside any per-read timeout, so only a limit on the whole fetch
+	 * stops it (review r2, S-a).
+	 *
+	 * @param interval pause before each byte of the body
+	 */
+	public void drip(Duration interval) {
+		drip = interval;
 	}
 
 	/** From now on JWKS requests are accepted and never answered, until {@link #resume()}. */
@@ -165,21 +199,44 @@ public final class FakeAuth0 implements AutoCloseable {
 
 	private void serveJwks(HttpExchange exchange) throws IOException {
 		jwksRequests.incrementAndGet();
+		serveJson(exchange, publishedJson);
+	}
+
+	private void serveDiscovery(HttpExchange exchange) throws IOException {
+		serveJson(exchange, "{\"issuer\":\"" + issuer() + "\",\"jwks_uri\":\"" + issuer() + ".well-known/jwks.json\"}");
+	}
+
+	private void serveNotFound(HttpExchange exchange) throws IOException {
+		requests.incrementAndGet();
+		exchange.sendResponseHeaders(404, -1);
+		exchange.close();
+	}
+
+	private void serveJson(HttpExchange exchange, String json) throws IOException {
+		requests.incrementAndGet();
 		CountDownLatch current = hang;
-		if (current != null) {
-			try {
+		Duration interval = drip;
+		try {
+			if (current != null) {
 				current.await(1, TimeUnit.MINUTES);
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				exchange.close();
-				return;
 			}
-		}
-		byte[] body = new JWKSet(published).toString().getBytes(StandardCharsets.UTF_8);
-		exchange.getResponseHeaders().add("Content-Type", "application/json");
-		exchange.sendResponseHeaders(200, body.length);
-		try (OutputStream out = exchange.getResponseBody()) {
-			out.write(body);
+			byte[] body = json.getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().add("Content-Type", "application/json");
+			exchange.sendResponseHeaders(200, body.length);
+			try (OutputStream out = exchange.getResponseBody()) {
+				if (interval == null) {
+					out.write(body);
+					return;
+				}
+				for (byte b : body) {
+					Thread.sleep(interval);
+					out.write(b);
+					out.flush();
+				}
+			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			exchange.close();
 		}
 	}
 
