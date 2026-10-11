@@ -28,6 +28,7 @@ import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededExcepti
 import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
 import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
+import pt.diamondcars.catalogbackend.web.exception.ResourceInUseException;
 import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
 import pt.diamondcars.catalogbackend.web.exception.UnknownSortPropertyException;
 
@@ -190,6 +191,20 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(HighlightLimitExceededException.class)
 	public ResponseEntity<ApiError> handleHighlightLimitExceeded(
 			HighlightLimitExceededException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link ResourceInUseException} (deleting a client/partner refused because a car still
+	 * references it, TASK-004) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code ClientService}/{@code PartnerService}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(ResourceInUseException.class)
+	public ResponseEntity<ApiError> handleResourceInUse(
+			ResourceInUseException exception, HttpServletRequest request) {
 		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
 	}
 

@@ -132,3 +132,22 @@ o pool cheio (o Hikari enche-o até ao máximo); a suite já tem 9 contextos de 
 propriedades, `@Import`, `@MockitoBean`) custa 10 ligações enquanto a JVM viver. A escrita de cada worker tem de acontecer
 **depois** da decisão (aqui `saveAndFlush` no fim do método); se o código escrever antes de
 decidir, o portão prende-o antes da decisão e o teste deixa de provar a corrida.
+
+## Clientes e parceiros (TASK-004)
+
+`/api/backoffice/clients` e `/api/backoffice/partners` seguem a mesma convenção dos carros, com
+duas diferenças deliberadas:
+
+- **Sem allow-list própria de `sort`.** `Client` e `Partner` são entidades planas, sem coleção
+  nem associação exposta no DTO (ao contrário de `Car`, com `images`/`partner`/`client` LAZY) —
+  não há junção para uma ordenação maliciosa explorar. O handler genérico de
+  `PropertyReferenceException` (TASK-003 AC H) já responde 400 a qualquer propriedade
+  inexistente; uma allow-list só se justifica para bloquear uma junção real.
+- **`ResourceInUseException` (409)** em vez de deixar o `DataIntegrityViolationException` da FK
+  chegar ao cliente: `ClientService#delete`/`PartnerService#delete` verificam
+  `existsByClientId`/`existsByPartnerId` antes de apagar, com a mensagem a nomear o recurso.
+
+`PartnerService` ganhou `incrementCarsCount`/`decrementCarsCount`/`registerCommission`/
+`reverseCommission` **sem nenhum chamador ainda** — mutam só o objeto em memória (sem
+repositório), provados por `PartnerServiceCountersTest` (unitário puro). A TASK-010 liga-os a
+`BackOfficeCarService#sell`/`revertSale`/`update` quando os criar.
