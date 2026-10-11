@@ -5,6 +5,7 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.core.PropertyReferenceException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
@@ -23,9 +24,12 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import pt.diamondcars.catalogbackend.web.dto.ApiError;
 import pt.diamondcars.catalogbackend.web.exception.CarNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededException;
 import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
 import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
+import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.UnknownSortPropertyException;
 
 /**
  * Central exception-to-HTTP-response translation for the whole API, per TASK-014 requirement 7.
@@ -158,6 +162,65 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(AccessDeniedException.class)
 	public ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException exception, HttpServletRequest request) {
 		return respond(HttpStatus.FORBIDDEN, "Autenticado, mas sem a role exigida para esta operacao", request);
+	}
+
+	/**
+	 * Maps {@link ResourceNotFoundException} (a back-office resource that does not exist, e.g. {@code
+	 * Carro nao encontrado: <id>} or {@code Parceiro nao encontrado: <id>}, TASK-003) to 404 with the
+	 * exception's message.
+	 *
+	 * @param exception the exception thrown by a back-office service
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 404 response body
+	 */
+	@ExceptionHandler(ResourceNotFoundException.class)
+	public ResponseEntity<ApiError> handleResourceNotFound(
+			ResourceNotFoundException exception, HttpServletRequest request) {
+		return respond(HttpStatus.NOT_FOUND, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link HighlightLimitExceededException} (featuring one more car would exceed the 8-car
+	 * limit, TASK-003 AC E.1) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code BackOfficeCarService}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(HighlightLimitExceededException.class)
+	public ResponseEntity<ApiError> handleHighlightLimitExceeded(
+			HighlightLimitExceededException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link UnknownSortPropertyException} (a {@code sort} property outside a back-office
+	 * listing's allow-list, TASK-003 AC D.3) to 400.
+	 *
+	 * @param exception the exception thrown before the listing query runs
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(UnknownSortPropertyException.class)
+	public ResponseEntity<ApiError> handleUnknownSortProperty(
+			UnknownSortPropertyException exception, HttpServletRequest request) {
+		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps Spring Data's {@link PropertyReferenceException} (a {@code sort} property the entity does
+	 * not have) to 400 with the same message as {@link UnknownSortPropertyException}, instead of a
+	 * 500. Safety net for a {@code Pageable} listing without its own allow-list (TASK-003 AC H).
+	 *
+	 * @param exception the exception Spring Data raises when resolving the sort property
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(PropertyReferenceException.class)
+	public ResponseEntity<ApiError> handlePropertyReference(
+			PropertyReferenceException exception, HttpServletRequest request) {
+		return respond(
+				HttpStatus.BAD_REQUEST, "Campo de ordenacao desconhecido: " + exception.getPropertyName(), request);
 	}
 
 	/**
