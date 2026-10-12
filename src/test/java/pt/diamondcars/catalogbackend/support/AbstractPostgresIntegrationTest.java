@@ -36,15 +36,31 @@ import org.testcontainers.utility.DockerImageName;
 public abstract class AbstractPostgresIntegrationTest {
 
 	/**
+	 * {@code max_connections} of the test container (TASK-012). Every cached Spring test context
+	 * keeps its Hikari pool full (10 connections) for as long as the JVM lives: at 100, PostgreSQL's
+	 * default, the 9 contexts of today used 90, and one more context of 20 failed with {@code FATAL:
+	 * sorry, too many clients already}. 300 keeps the projected worst case of release 0.1.0 (171) under
+	 * 80% and leaves room for about 22 cached contexts of 10 plus the transient pool of 20 of {@code
+	 * HighlightLimitConcurrencyTest}; beyond that, raise it again or lower {@code minimum-idle}.
+	 * Fixed by {@code PostgresTestContainerSettingsTest}.
+	 */
+	static final int MAX_CONNECTIONS = 300;
+
+	/**
 	 * Ephemeral PostgreSQL 16 container backing every integration test that extends this class.
 	 * Declared {@code static} so it is created exactly once per JVM and reused across all
 	 * subclasses, and annotated with {@link ServiceConnection} so Spring Boot auto-configures the
 	 * {@code DataSource} (and, transitively, JPA/Flyway) from it, overriding any placeholder
 	 * datasource configuration from {@code application.yml}.
+	 *
+	 * <p>{@code withCommand} replaces the whole command, including the {@code -c fsync=off} that the
+	 * {@link PostgreSQLContainer} constructor sets: it is repeated here on purpose, so raising {@link
+	 * #MAX_CONNECTIONS} does not silently turn {@code fsync} back on.
 	 */
 	@ServiceConnection
 	protected static final PostgreSQLContainer POSTGRES =
-			new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"));
+			new PostgreSQLContainer(DockerImageName.parse("postgres:16-alpine"))
+					.withCommand("postgres", "-c", "fsync=off", "-c", "max_connections=" + MAX_CONNECTIONS);
 
 	static {
 		POSTGRES.start();
