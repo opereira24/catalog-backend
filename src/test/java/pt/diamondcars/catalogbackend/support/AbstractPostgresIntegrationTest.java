@@ -38,8 +38,8 @@ public abstract class AbstractPostgresIntegrationTest {
 	/**
 	 * {@code max_connections} of the test container (TASK-012). Every cached Spring test context
 	 * keeps its Hikari pool full (10 connections) for as long as the JVM lives: at 100, PostgreSQL's
-	 * default, the 9 contexts of today used 90, and one more context of 20 failed with {@code FATAL:
-	 * sorry, too many clients already}. 300 keeps the projected worst case of release 0.1.0 (171) under
+	 * default, the 9 contexts of today used 90, and caching one more with a pool of 20 made the next
+	 * context fail with {@code FATAL: sorry, too many clients already} (TASK-003). 300 keeps the projected worst case of release 0.1.0 (171) under
 	 * 80% and leaves room for about 22 cached contexts of 10 plus the transient pool of 20 of {@code
 	 * HighlightLimitConcurrencyTest}; beyond that, raise it again or lower {@code minimum-idle}.
 	 * Fixed by {@code PostgresTestContainerSettingsTest}.
