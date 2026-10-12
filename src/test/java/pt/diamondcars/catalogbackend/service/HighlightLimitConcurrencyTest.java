@@ -40,11 +40,13 @@ import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededExcepti
  * all of them write; with it they queue on the lock and each count sees the previous commit.
  *
  * <p>Own context with a pool of 20: 9 workers, the gate and the polling query do not fit in the
- * default 10. {@link DirtiesContext} closes it (and its 20 connections) right after this class:
- * the test container has PostgreSQL's default {@code max_connections} (100, 3 reserved), every
- * cached context keeps its pool open (Hikari fills it to the maximum), and the suite already has 9
- * contexts of 10. Kept cached, this one made the 10th context fail with {@code FATAL: sorry, too
- * many clients already} (measured in {@code mvnw clean verify}).
+ * default 10. {@link DirtiesContext} closes it (and its 20 connections) right after this class
+ * instead of keeping them until the JVM exits: every cached context keeps its pool full (Hikari
+ * fills it to the maximum), and the test container's {@code max_connections} is a budget shared by
+ * all of them ({@code AbstractPostgresIntegrationTest#MAX_CONNECTIONS}, 300 since TASK-012).
+ * History: with PostgreSQL's default of 100 and 9 cached contexts of 10, keeping this one cached
+ * made the next context fail with {@code FATAL: sorry, too many clients already} (TASK-003,
+ * measured in {@code mvnw clean verify}).
  */
 @SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=20")
 @DirtiesContext
