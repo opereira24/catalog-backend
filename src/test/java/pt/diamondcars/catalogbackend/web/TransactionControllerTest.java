@@ -756,7 +756,7 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 
 	/**
 	 * Date filters outside the range PostgreSQL's {@code DATE} accepts (both parsed by {@code
-	 * ?from=}/{@code ?to=}) are 200 with the right result, never a 500 from the database: {@code
+	 * ?from=}/{@code ?to=}) are 200 with the right result, never the 409 that PostgreSQL's {@code date out of range} becomes: {@code
 	 * from} far in the past lists everything, {@code to} far in the past and {@code from} far in the
 	 * future list nothing (ASSUNÇÃO of the developer, TASK-005 Notas: AC C.2 only clamps {@code from}
 	 * down and {@code to} up).

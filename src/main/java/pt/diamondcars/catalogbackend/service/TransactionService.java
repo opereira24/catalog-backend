@@ -260,7 +260,8 @@ public class TransactionService {
 	 * changes which rows match, because no stored {@code data} is outside {@code [MIN_DATA,
 	 * MAX_DATA]} ({@link TransactionRequest#resolveData()}); both keep a year like {@code -5000} or
 	 * {@code +999999999}, which {@code ?from=} parses, out of PostgreSQL ({@code DATE} goes from 4713
-	 * BC to 5874897 AD; outside it the query fails and the caller gets a 500).
+	 * BC to 5874897 AD; outside it the query fails with {@code date out of range}, which reaches
+	 * the caller as a 409 through the {@code DataIntegrityViolationException} handler, measured).
 	 */
 	private static LocalDate lowerBound(LocalDate from) {
 		if (from.isBefore(TransactionRequest.MIN_DATA)) {

@@ -205,7 +205,7 @@ class FinanceControllerTest extends AbstractPostgresIntegrationTest {
 
 	/**
 	 * Bounds outside PostgreSQL's {@code DATE} range (parsed by {@code ?from=}/{@code ?to=}) answer
-	 * 200 with the right totals, never a 500 from the database (ASSUNÇÃO of the developer, TASK-005
+	 * 200 with the right totals, never the 409 that PostgreSQL's {@code date out of range} becomes (ASSUNÇÃO of the developer, TASK-005
 	 * Notas).
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
