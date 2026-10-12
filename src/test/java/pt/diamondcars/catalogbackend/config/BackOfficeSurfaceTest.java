@@ -72,7 +72,8 @@ class BackOfficeSurfaceTest extends AbstractPostgresIntegrationTest {
 
 		assertThat(outsideThePrefix).as("non-public /api routes outside /api/backoffice/").isEmpty();
 		assertThat(withoutPreAuthorize).as("non-public /api routes without @PreAuthorize").isEmpty();
-		// Positive control: the walk does see this task's six handlers (an empty walk proves nothing).
+		// Positive control: the walk does see the back-office handlers of each task that added some
+		// (an empty walk proves nothing): cars (TASK-003), transactions and finances (TASK-005).
 		assertThat(backOfficeRoutes)
 				.contains(
 						"GET /api/backoffice/cars",
@@ -80,7 +81,13 @@ class BackOfficeSurfaceTest extends AbstractPostgresIntegrationTest {
 						"POST /api/backoffice/cars",
 						"POST /api/backoffice/cars/{id}/reserve",
 						"POST /api/backoffice/cars/{id}/release-reservation",
-						"PATCH /api/backoffice/cars/{id}/highlight");
+						"PATCH /api/backoffice/cars/{id}/highlight",
+						"GET /api/backoffice/transactions",
+						"GET /api/backoffice/transactions/{id}",
+						"POST /api/backoffice/transactions",
+						"PUT /api/backoffice/transactions/{id}",
+						"DELETE /api/backoffice/transactions/{id}",
+						"GET /api/backoffice/finances/summary");
 	}
 
 	private static boolean hasPreAuthorize(HandlerMethod handler) {

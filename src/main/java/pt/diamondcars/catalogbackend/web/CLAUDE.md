@@ -161,3 +161,64 @@ duas diferenças deliberadas:
 `reverseCommission` **sem nenhum chamador ainda** — mutam só o objeto em memória (sem
 repositório), provados por `PartnerServiceCountersTest` (unitário puro). A TASK-010 liga-os a
 `BackOfficeCarService#sell`/`revertSale`/`update` quando os criar.
+
+## Transações e finanças (TASK-005)
+
+`/api/backoffice/transactions` (CRUD) e `/api/backoffice/finances/summary` seguem a convenção dos
+carros. O que não se adivinha pelo código:
+
+- **Allow-list de `sort`** (`TransactionService#SORTABLE_PROPERTIES`, só escalares). Ao contrário de
+  `Client`/`Partner`, a `Transaction` tem 3 associações `LAZY` (`car`, `client`, `partner`): sem a
+  lista, `sort=car.marca` ou `sort=partner.name` eram junções aceites pelo Spring Data.
+- **Ordem por omissão `data, createdAt, id` DESC.** Várias transações no mesmo dia são o caso
+  normal (compra e venda do mesmo carro, despesas do dia); só com `data` as páginas repetiam ou
+  saltavam linhas. `TransactionControllerTest#defaultOrderIsDataThenCreatedAtThenIdDescendingAndPagesAreStable`
+  insere por SQL com `created_at` crescente para que a falta de desempate apareça como ordem física,
+  e dá à mais antiga do dia o **maior** `id`: com `id` a crescer junto com `created_at`, `data, id`
+  (sem `createdAt`) dava a mesma ordem e o teste não provava o desempate (review r1 da TASK-005).
+- **`?tipo=` por `PropertyEditor`, não por `Converter`** (`TransactionTypeQueryConverter`, registado
+  no `@InitBinder` do controller). Medido: um `Converter<String, TransactionType>` bean recusa
+  `VENDA`, mas o `TypeConverterDelegate` do Spring apanha o `ConversionFailedException` e tenta
+  `Enum.valueOf`, por isso `?tipo=VENDA` dava 200. Um editor próprio é consultado antes do
+  `ConversionService` e não tem esse recurso. Vale para qualquer enum de query que tenha de recusar
+  o nome da constante Java. Um editor também perde o "vazio = sem filtro" que o Spring dá a
+  qualquer enum: `?tipo=` vazio ou só com espaços tem de devolver `null` explicitamente no
+  `setAsText`, senão é 400 (o "Todos" de um formulário envia o campo vazio, e `?carroId=`/`?from=`
+  vazios da mesma rota não filtram).
+- **`valor` com `@Digits(integer = 8, fraction = 2)`**: `NUMERIC(12,2)` arredonda `10.005` para
+  `10.01` sem erro, e o 201 devolvia `10.005` (a entidade em memória não é relida). Sempre positivo:
+  o sentido do dinheiro vem só do `tipo`.
+- **`data` em `[0001-01-01, 9999-12-31]` e até 64 caracteres** (`TransactionRequest#resolveData`).
+  `LocalDate.parse` aceita `+10000-01-01` e `0000-12-31`; gravados, ficavam fora das datas sentinela
+  do summary. A mensagem de erro repete o valor, daí o teto de tamanho.
+- **Filtros `from`/`to` fora do `DATE` do PostgreSQL** (`?from=-5000-01-01` e
+  `?to=+999999999-12-31` passam no `@DateTimeFormat(iso = DATE)`): `TransactionService#lowerBound`/
+  `upperBound` trazem-nos para `[MIN_DATA - 1 dia, MAX_DATA + 1 dia]`, o que não muda nenhum
+  resultado (nenhuma `data` gravada está fora de `[MIN_DATA, MAX_DATA]`) e evita o `date out of range`
+  do PostgreSQL, que chegava ao cliente como 409 `Pedido em conflito` (o Spring traduz o
+  `DataException` para `DataIntegrityViolationException`; medido na mutação 14 da TASK-005).
+- **`systemGenerated`, `clienteId`, `partnerId` só pelo serviço.** O corpo do pedido não os
+  declara; chaves desconhecidas são ignoradas. É uma garantia de segurança: uma transação marcada
+  `systemGenerated` pelo cliente seria apagada pela reversão de uma venda (TASK-010).
+- **`PUT` muda só os 5 campos de negócio** (`tipo`, `valor`, `descricao`, `categoria`, `data`) e
+  ignora `carroId`, também em transações de sistema: o "Editar" do `dcbo` abre todas, e reaplicar
+  `carroId` desligava uma venda do seu carro na primeira edição. `PUT`/`DELETE` são permitidos em
+  transações de sistema a `ADMIN` e `USER` (paridade com `dcbo`).
+- **`InvalidReferenceException` dá 400, não 404**: `carroId` inexistente é um campo do corpo, não o
+  recurso do URL (o `partnerId` de `CarRequest` dá 404 por precedente próprio).
+- **3 métodos para a TASK-010**, sem chamador ainda: `createSaleTransaction`,
+  `deleteSaleTransactions` (só `system_generated`), `deleteAllForCar` (manuais incluídas).
+  Propagação `REQUIRED`, nunca `REQUIRES_NEW`: correm dentro da transação do `sell`/`revertSale`/
+  `delete` do carro e uma falha depois deles desfaz o movimento financeiro
+  (`TransactionServiceTest#createSaleTransactionRollsBackWithTheCallersTransaction`).
+- **`Clock` por construtor package-private, não bean.** O construtor público usa
+  `Clock.systemUTC()`; a data da venda é sempre `LocalDate.ofInstant(clock.instant(), Europe/Lisbon)`.
+  `TransactionServiceSaleDateTest` (sem Spring, zero ligações) fixa o instante. Um bean `Clock`
+  convidava outro código a depender dele e substituí-lo num teste custava um contexto novo (10
+  ligações).
+- **Summary**: duas somas em `READ COMMITTED`; uma transação gravada entre elas pode entrar num total
+  e não no outro, o `saldo` é sempre a diferença dos dois números devolvidos. Aceite para um ecrã de
+  resumo. Números com exatamente 2 casas (`BigDecimal` escala 2): os testes afirmam o texto
+  (`"saldo":-50.00`), não o valor do JsonPath, que perde as casas.
+- Custo fixo: listar 100 transações com carro, cliente e parceiro são no máximo 3 statements
+  (página, `count`, `ActiveUserInterceptor`); o DTO só lê `getId()` dos proxies.

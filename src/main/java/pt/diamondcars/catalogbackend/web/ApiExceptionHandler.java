@@ -26,6 +26,8 @@ import pt.diamondcars.catalogbackend.web.dto.ApiError;
 import pt.diamondcars.catalogbackend.web.exception.CarNotFoundException;
 import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededException;
 import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
+import pt.diamondcars.catalogbackend.web.exception.InvalidReferenceException;
+import pt.diamondcars.catalogbackend.web.exception.InvalidTransactionDateException;
 import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
 import pt.diamondcars.catalogbackend.web.exception.ResourceInUseException;
@@ -219,6 +221,34 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(UnknownSortPropertyException.class)
 	public ResponseEntity<ApiError> handleUnknownSortProperty(
 			UnknownSortPropertyException exception, HttpServletRequest request) {
+		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link InvalidTransactionDateException} (a transaction {@code data} in neither accepted
+	 * format, or outside {@code [0001-01-01, 9999-12-31]}, TASK-005 AC B.4) to 400.
+	 *
+	 * @param exception the exception {@code TransactionRequest#resolveData()} throws
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(InvalidTransactionDateException.class)
+	public ResponseEntity<ApiError> handleInvalidTransactionDate(
+			InvalidTransactionDateException exception, HttpServletRequest request) {
+		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link InvalidReferenceException} (a body field naming a resource that does not exist,
+	 * e.g. {@code carroId: carro nao encontrado: <id>}, TASK-005 AC B.4) to 400.
+	 *
+	 * @param exception the exception thrown by {@code TransactionService#create}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(InvalidReferenceException.class)
+	public ResponseEntity<ApiError> handleInvalidReference(
+			InvalidReferenceException exception, HttpServletRequest request) {
 		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
 	}
 
