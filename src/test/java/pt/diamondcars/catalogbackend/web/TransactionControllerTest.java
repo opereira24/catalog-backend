@@ -2,6 +2,7 @@ package pt.diamondcars.catalogbackend.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -289,6 +290,28 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
+	 * AC A.2: {@code from} and {@code to} are inclusive on both sides (review r1, I-3). One
+	 * transaction on each bound and one on the day just outside each: a monthly filter keeps its
+	 * first and last day, and an exclusive {@code >}/{@code <} in {@code TransactionSpecifications}
+	 * would drop one of them.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void theDateRangeFilterIncludesBothBounds() throws Exception {
+		saved(TransactionType.DESPESA, "10.00", LocalDate.of(2026, 1, 31));
+		Transaction firstDay = saved(TransactionType.DESPESA, "20.00", LocalDate.of(2026, 2, 1));
+		Transaction lastDay = saved(TransactionType.DESPESA, "30.00", LocalDate.of(2026, 2, 28));
+		saved(TransactionType.DESPESA, "40.00", LocalDate.of(2026, 3, 1));
+
+		JsonNode content = getJson(get(PATH).param("from", "2026-02-01").param("to", "2026-02-28")).get("content");
+
+		List<String> ids = new ArrayList<>();
+		content.forEach(transaction -> ids.add(transaction.get("id").asString()));
+		assertThat(ids).containsExactly(lastDay.getId().toString(), firstDay.getId().toString());
+	}
+
+	/**
 	 * {@code ?tipo=compra} filters by the lower-case value, through {@link
 	 * TransactionTypeQueryConverter}.
 	 *
@@ -533,12 +556,19 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	 */
 	@Test
 	void dataIsBetweenYearOneAndYear9999AndAtMost64Characters() throws Exception {
-		for (String refused : List.of("+10000-01-01", "0000-12-31", "2026-03-31" + "x".repeat(55))) {
+		String overTheCap = "2026-03-31" + "x".repeat(55);
+		for (String refused : List.of("+10000-01-01", "0000-12-31", overTheCap)) {
 			mockMvc
 					.perform(postJson(withData(refused)).with(user()))
 					.andExpect(status().isBadRequest())
 					.andExpect(jsonPath("$.message", startsWith("data: ")));
 		}
+		// The 64-character cap is checked by @Size, before resolveData, whose message echoes the value:
+		// one character over the cap is refused without being repeated back (review r1, S-1).
+		mockMvc
+				.perform(postJson(withData(overTheCap)).with(user()))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message", not(containsString(overTheCap))));
 		assertThat(transactionRepository.count()).isZero();
 
 		for (String limit : List.of("0001-01-01", "9999-12-31")) {
@@ -581,6 +611,23 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
+	 * An empty or blank {@code ?tipo=} does not filter (review r1, I-1): it is what the "all types"
+	 * option of a form sends, and the empty {@code ?carroId=}/{@code ?from=} of the same route do not
+	 * filter either. Without the blank check in {@link TransactionTypeQueryConverter} both were a 400.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void anEmptyTipoFilterListsEveryType() throws Exception {
+		saved(TransactionType.COMPRA, "10.00", LocalDate.of(2026, 1, 1));
+		saved(TransactionType.RECEITA, "20.00", LocalDate.of(2026, 1, 2));
+
+		for (String tipo : List.of("", " ")) {
+			assertThat(getJson(get(PATH).param("tipo", tipo)).get("content")).as("tipo=[%s]", tipo).hasSize(2);
+		}
+	}
+
+	/**
 	 * AC D.1.h: {@code sort} through an association is a 400 before any query; a scalar property
 	 * sorts.
 	 *
@@ -608,8 +655,10 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	 * AC D.1.i: default order is {@code data}, then {@code createdAt}, then {@code id}, all
 	 * descending. Three transactions on the same day (two with the same {@code createdAt}) and one
 	 * later: the later one first, then the other three in exactly that order across pages of one.
-	 * Inserted by SQL in ascending {@code id} and ascending {@code createdAt}, so a missing
-	 * tie-breaker shows up as the heap order (mutation 10 of AC D.7).
+	 * Inserted by SQL in ascending {@code createdAt}, so a missing tie-breaker shows up as the heap
+	 * order (mutation 10 of AC D.7). The earliest of the day has the highest {@code id}, so {@code
+	 * data, id} without {@code createdAt} puts it first of the day and fails too (review r1, I-2: with
+	 * {@code id} growing with {@code createdAt} both orders were the same).
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
@@ -617,7 +666,7 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	void defaultOrderIsDataThenCreatedAtThenIdDescendingAndPagesAreStable() throws Exception {
 		Timestamp earlier = Timestamp.from(Instant.parse("2026-03-10T09:00:00Z"));
 		Timestamp later = Timestamp.from(Instant.parse("2026-03-10T18:00:00Z"));
-		String earlierSameDay = "00000000-0000-0000-0000-000000000001";
+		String earlierSameDay = "00000000-0000-0000-0000-000000000009";
 		String laterSameDayLowId = "00000000-0000-0000-0000-000000000002";
 		String laterSameDayHighId = "00000000-0000-0000-0000-000000000003";
 		String nextDay = "00000000-0000-0000-0000-000000000004";
@@ -766,9 +815,13 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	@Test
 	void dateFiltersBeyondTheDatabaseRangeAnswerWithoutError() throws Exception {
 		saved(TransactionType.DESPESA, "10.00", LocalDate.of(2026, 1, 1));
+		// One row on each limit of the accepted range: an empty bound clamped to MAX_DATA/MIN_DATA
+		// instead of one day past it would return them (review r1, S-2).
+		saved(TransactionType.DESPESA, "20.00", TransactionRequest.MIN_DATA);
+		saved(TransactionType.DESPESA, "30.00", TransactionRequest.MAX_DATA);
 
-		assertThat(getJson(get(PATH).param("from", "-5000-01-01")).get("content")).hasSize(1);
-		assertThat(getJson(get(PATH).param("to", "+999999999-12-31")).get("content")).hasSize(1);
+		assertThat(getJson(get(PATH).param("from", "-5000-01-01")).get("content")).hasSize(3);
+		assertThat(getJson(get(PATH).param("to", "+999999999-12-31")).get("content")).hasSize(3);
 		assertThat(getJson(get(PATH).param("to", "-5000-01-01")).get("content")).isEmpty();
 		assertThat(getJson(get(PATH).param("from", "+999999999-12-31")).get("content")).isEmpty();
 	}
