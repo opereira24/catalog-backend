@@ -173,14 +173,18 @@ carros. O que não se adivinha pelo código:
 - **Ordem por omissão `data, createdAt, id` DESC.** Várias transações no mesmo dia são o caso
   normal (compra e venda do mesmo carro, despesas do dia); só com `data` as páginas repetiam ou
   saltavam linhas. `TransactionControllerTest#defaultOrderIsDataThenCreatedAtThenIdDescendingAndPagesAreStable`
-  insere por SQL com `id`/`created_at` crescentes para que a falta de desempate apareça como ordem
-  física.
+  insere por SQL com `created_at` crescente para que a falta de desempate apareça como ordem física,
+  e dá à mais antiga do dia o **maior** `id`: com `id` a crescer junto com `created_at`, `data, id`
+  (sem `createdAt`) dava a mesma ordem e o teste não provava o desempate (review r1 da TASK-005).
 - **`?tipo=` por `PropertyEditor`, não por `Converter`** (`TransactionTypeQueryConverter`, registado
   no `@InitBinder` do controller). Medido: um `Converter<String, TransactionType>` bean recusa
   `VENDA`, mas o `TypeConverterDelegate` do Spring apanha o `ConversionFailedException` e tenta
   `Enum.valueOf`, por isso `?tipo=VENDA` dava 200. Um editor próprio é consultado antes do
   `ConversionService` e não tem esse recurso. Vale para qualquer enum de query que tenha de recusar
-  o nome da constante Java.
+  o nome da constante Java. Um editor também perde o "vazio = sem filtro" que o Spring dá a
+  qualquer enum: `?tipo=` vazio ou só com espaços tem de devolver `null` explicitamente no
+  `setAsText`, senão é 400 (o "Todos" de um formulário envia o campo vazio, e `?carroId=`/`?from=`
+  vazios da mesma rota não filtram).
 - **`valor` com `@Digits(integer = 8, fraction = 2)`**: `NUMERIC(12,2)` arredonda `10.005` para
   `10.01` sem erro, e o 201 devolvia `10.005` (a entidade em memória não é relida). Sempre positivo:
   o sentido do dinheiro vem só do `tipo`.
