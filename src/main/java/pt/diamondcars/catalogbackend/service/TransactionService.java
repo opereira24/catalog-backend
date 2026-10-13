@@ -102,7 +102,8 @@ public class TransactionService {
 	 * @param from inclusive lower bound of {@code data}, or {@code null}
 	 * @param to inclusive upper bound of {@code data}, or {@code null}
 	 * @param pageable pagination and sorting (the controller defaults to {@code data, createdAt, id}
-	 *     descending, 50 per page)
+	 *     descending, 50 per page); {@code id} DESC is appended when the sort lacks it ({@link
+	 *     StableSort#withIdTiebreak}), after the allow-list check
 	 * @return the requested page
 	 * @throws UnknownSortPropertyException if a sort property is outside {@link
 	 *     #SORTABLE_PROPERTIES} (mapped to 400), checked before any query
@@ -111,10 +112,11 @@ public class TransactionService {
 	public Page<TransactionResponse> list(
 			TransactionType tipo, UUID carroId, LocalDate from, LocalDate to, Pageable pageable) {
 		requireSortable(pageable.getSort());
+		Pageable stablePageable = StableSort.withIdTiebreak(pageable);
 		LocalDate effectiveFrom = from != null ? lowerBound(from) : null;
 		LocalDate effectiveTo = to != null ? upperBound(to) : null;
 		return transactionRepository
-				.findAll(TransactionSpecifications.matching(tipo, carroId, effectiveFrom, effectiveTo), pageable)
+				.findAll(TransactionSpecifications.matching(tipo, carroId, effectiveFrom, effectiveTo), stablePageable)
 				.map(TransactionResponse::from);
 	}
 

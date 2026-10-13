@@ -48,13 +48,14 @@ public class ClientService {
 	 *
 	 * @param search free text to search for, or {@code null}/blank to not filter at all
 	 * @param pageable pagination/sorting, defaulted by the controller to 50 per page sorted by
-	 *     {@code createdAt} descending
+	 *     {@code createdAt} descending; {@code id} DESC is appended when the sort lacks it ({@link
+	 *     StableSort#withIdTiebreak})
 	 * @return the requested page, mapped to {@link ClientResponse}
 	 */
 	@Transactional(readOnly = true)
 	public Page<ClientResponse> list(String search, Pageable pageable) {
 		return clientRepository
-				.findAll(ClientSpecifications.matching(search), pageable)
+				.findAll(ClientSpecifications.matching(search), StableSort.withIdTiebreak(pageable))
 				.map(ClientResponse::from);
 	}
 

@@ -14,21 +14,31 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import pt.diamondcars.catalogbackend.domain.car.Car;
 import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.domain.client.Client;
 import pt.diamondcars.catalogbackend.domain.client.ClientRepository;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 import pt.diamondcars.catalogbackend.web.dto.ClientRequest;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -47,6 +57,7 @@ class ClientControllerTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired private MockMvc mockMvc;
 	@Autowired private ObjectMapper objectMapper;
+	@Autowired private JdbcTemplate jdbcTemplate;
 	@Autowired private ClientRepository clientRepository;
 	@Autowired private CarRepository carRepository;
 
@@ -375,5 +386,52 @@ class ClientControllerTest extends AbstractPostgresIntegrationTest {
 								.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
 				.andExpect(status().isBadRequest())
 				.andExpect(content().string(containsString("nosuchfield")));
+	}
+
+	/**
+	 * TASK-013, B.3: the listing ends in {@code id} DESC both with the controller default
+	 * ({@code createdAt} only, so it never had a tie-breaker) and with a {@code ?sort=} from the
+	 * client. Three clients with the same {@code name} and the same {@code created_at} (and the same {@code phone}),
+	 * inserted by SQL in ascending {@code id}: without the tie-breaker PostgreSQL returns the heap
+	 * order {@code 01, 02, 03} (mutation 3 of AC B.6), with it {@code 03, 02, 01}.
+	 *
+	 * @param sort the {@code sort} parameter, or {@code null} to rely on the controller default
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@ParameterizedTest(name = "sort={0}")
+	@NullSource
+	@ValueSource(strings = "name,asc")
+	void listingHasIdAsLastTiebreakerWithAndWithoutARequestedSort(String sort) throws Exception {
+		Timestamp createdAt = Timestamp.from(Instant.parse("2026-10-01T12:00:00Z"));
+		List<String> ascendingIds = List.of(
+				"00000000-0000-0000-0000-000000000001",
+				"00000000-0000-0000-0000-000000000002",
+				"00000000-0000-0000-0000-000000000003");
+		for (String id : ascendingIds) {
+			jdbcTemplate.update(
+					"INSERT INTO clients (id, name, phone, created_at, updated_at)"
+							+ " VALUES (?::uuid, 'Cliente Igual', '912345678', ?, ?)",
+					id, createdAt, createdAt);
+		}
+		jdbcTemplate.execute("ANALYZE clients");
+
+		List<String> paged = new ArrayList<>();
+		for (int page = 0; page < ascendingIds.size(); page++) {
+			MockHttpServletRequestBuilder request =
+					get(PATH).param("size", "1").param("page", String.valueOf(page));
+			if (sort != null) {
+				request.param("sort", sort);
+			}
+			String response = mockMvc
+					.perform(request.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+					.andExpect(status().isOk())
+					.andReturn()
+					.getResponse()
+					.getContentAsString();
+			JsonNode content = objectMapper.readTree(response).get("content");
+			content.forEach(client -> paged.add(client.get("id").asString()));
+		}
+
+		assertThat(paged).containsExactlyElementsOf(ascendingIds.reversed());
 	}
 }

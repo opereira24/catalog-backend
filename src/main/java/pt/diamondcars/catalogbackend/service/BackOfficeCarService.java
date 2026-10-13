@@ -120,7 +120,8 @@ public class BackOfficeCarService {
 	 * @param reservado required value of {@code reservado}, or {@code null} to not filter by it
 	 * @param destaque required value of {@code destaque}, or {@code null} to not filter by it
 	 * @param pageable page, size (capped globally by {@code spring.data.web.pageable.max-page-size})
-	 *     and sort, defaulted by the controller
+	 *     and sort, defaulted by the controller; {@code id} DESC is appended when the sort lacks it
+	 *     ({@link StableSort#withIdTiebreak}), after the allow-list check
 	 * @return the requested page
 	 * @throws UnknownSortPropertyException if a sort property is not in {@link #SORTABLE_PROPERTIES}
 	 *     (mapped to 400), checked before any query
@@ -130,7 +131,9 @@ public class BackOfficeCarService {
 			Boolean vendido, Boolean reservado, Boolean destaque, Pageable pageable) {
 		requireSortable(pageable.getSort());
 		return carRepository
-				.findAll(BackOfficeCarSpecifications.matching(vendido, reservado, destaque), pageable)
+				.findAll(
+						BackOfficeCarSpecifications.matching(vendido, reservado, destaque),
+						StableSort.withIdTiebreak(pageable))
 				.map(BackOfficeCarResponse::from);
 	}
 
