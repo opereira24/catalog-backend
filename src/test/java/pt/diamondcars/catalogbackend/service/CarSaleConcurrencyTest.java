@@ -5,10 +5,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -333,9 +336,7 @@ class CarSaleConcurrencyTest extends AbstractPostgresIntegrationTest {
 		Car moved = carRepository.saveAndFlush(aConsignmentCar(partnerA, "500.00").build());
 		Car sold = carRepository.saveAndFlush(aConsignmentCar(partnerB, "300.00").build());
 		carService.sell(moved.getId(), new SellCarRequest(PRICE, null));
-		CarRequest toPartnerB = new CarRequest(
-				"Audi", "A4", 2019, new BigDecimal("22000.00"), 80000, "Branco", "Gasolina", "Manual", "Nacional",
-				null, null, null, null, true, partnerB.getId(), new BigDecimal("500.00"), 0, null, null, null);
+		CarRequest toPartnerB = aConsignmentEdit(partnerB, "500.00");
 
 		List<Throwable> outcomes = race(
 				() -> carService.update(moved.getId(), toPartnerB),
@@ -348,6 +349,198 @@ class CarSaleConcurrencyTest extends AbstractPostgresIntegrationTest {
 		assertThat(reloadedA.getTotalCommission()).isEqualByComparingTo("0.00");
 		assertThat(reloadedB.getCarsCount()).isEqualTo(2);
 		assertThat(reloadedB.getTotalCommission()).isEqualByComparingTo("800.00");
+	}
+
+	/**
+	 * K11: a {@code PUT} and a sale of the same car. Both stick, whichever goes first: {@code vendido}
+	 * true, the sale price and the new model (without the car lock in {@code update}: the {@code PUT}
+	 * writes back the row it read before the sale, {@code vendido} false, while the counters and the
+	 * transaction stay; or the sale writes back the old model).
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void k11AnEditAndASaleOfTheSameCarBothStick() throws Exception {
+		Car car = carRepository.saveAndFlush(aCar().build());
+
+		List<Throwable> outcomes = race(
+				() -> carService.update(car.getId(), anEdit("A6")),
+				() -> carService.sell(car.getId(), new SellCarRequest(PRICE, null)));
+
+		assertThat(outcomes).containsOnlyNulls();
+		Car reloaded = carRepository.findById(car.getId()).orElseThrow();
+		assertThat(reloaded.isVendido()).isTrue();
+		assertThat(reloaded.getPrecoVenda()).isEqualByComparingTo(PRICE);
+		assertThat(reloaded.getModelo()).isEqualTo("A6");
+		assertThat(transactionRepository.count()).isEqualTo(1);
+	}
+
+	/**
+	 * K12: the {@code DELETE} (with its transactions, the default) and the sale to client C of the
+	 * same car. Whichever goes first, the car is gone with no transaction left and C with no purchase:
+	 * either the deletion undoes the committed sale, or the sale finds no car (404) (without the car
+	 * lock in {@code delete}: the deletion decides on the unsold car it read, the sale commits, and a
+	 * sale transaction is left without car while C keeps 1 purchase of a car that no longer exists).
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void k12TheDeletionAndTheSaleOfTheSameCarLeaveNoOrphanSale() throws Exception {
+		Client client = aClient("Ana");
+		Car car = carRepository.saveAndFlush(aCar().build());
+
+		List<Throwable> outcomes = race(
+				() -> {
+					carService.delete(car.getId(), true);
+					return null;
+				},
+				() -> carService.sell(car.getId(), new SellCarRequest(PRICE, client.getId())));
+
+		assertThat(outcomes.get(0)).isNull();
+		assertThat(outcomes.get(1)).satisfiesAnyOf(
+				sale -> assertThat(sale).isNull(),
+				sale -> assertThat(sale).isInstanceOf(ResourceNotFoundException.class));
+		assertThat(carRepository.existsById(car.getId())).isFalse();
+		assertThat(transactionRepository.count()).isZero();
+		assertThat(purchasesCount(client)).isZero();
+	}
+
+	/**
+	 * K13: the release of a reservation and the sale of the same reserved car. Both stick: {@code
+	 * vendido} true and {@code reservado} false (without the car lock in {@code releaseReservation}:
+	 * {@code vendido} false, as K4 for {@code reserve}).
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void k13AReleaseOfTheReservationAndASaleOfTheSameCarBothStick() throws Exception {
+		Car car = carRepository.saveAndFlush(aCar().reservado(true).build());
+
+		List<Throwable> outcomes = race(
+				() -> carService.releaseReservation(car.getId()),
+				() -> carService.sell(car.getId(), new SellCarRequest(PRICE, null)));
+
+		assertThat(outcomes).containsOnlyNulls();
+		Car reloaded = carRepository.findById(car.getId()).orElseThrow();
+		assertThat(reloaded.isVendido()).isTrue();
+		assertThat(reloaded.isReservado()).isFalse();
+		assertThat(transactionRepository.count()).isEqualTo(1);
+	}
+
+	/**
+	 * K14: the reversal of consignment car R (partner P, commission 100.00, sold) and the sale of
+	 * consignment car S (P, 200.00). P ends with {@code cars_count} 1 and {@code total_commission}
+	 * 200.00 (without the partner lock in {@code revertSale}: 0 and 0.00, or 2 and 300.00).
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void k14AConsignmentReversalAndASaleOfTheSamePartnerBothCount() throws Exception {
+		Partner partner = aPartner("Auto Silva");
+		Car reverted = carRepository.saveAndFlush(aConsignmentCar(partner, "100.00").build());
+		Car sold = carRepository.saveAndFlush(aConsignmentCar(partner, "200.00").build());
+		carService.sell(reverted.getId(), new SellCarRequest(PRICE, null));
+
+		List<Throwable> outcomes = race(
+				() -> carService.revertSale(reverted.getId()),
+				() -> carService.sell(sold.getId(), new SellCarRequest(PRICE, null)));
+
+		assertThat(outcomes).containsOnlyNulls();
+		Partner reloaded = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(reloaded.getCarsCount()).isEqualTo(1);
+		assertThat(reloaded.getTotalCommission()).isEqualByComparingTo("200.00");
+	}
+
+	/**
+	 * K15: the {@code DELETE} of car D, sold to client C, and the sale of car S to C. C ends with 1
+	 * purchase, S's, and only S's transaction is left (without the client lock in {@code delete}: 0 or
+	 * 2).
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void k15TheDeletionOfASoldCarAndASaleToTheSameClientBothCount() throws Exception {
+		Client client = aClient("Ana");
+		Car deleted = carRepository.saveAndFlush(aCar().build());
+		Car sold = carRepository.saveAndFlush(aCar().build());
+		carService.sell(deleted.getId(), new SellCarRequest(PRICE, client.getId()));
+
+		List<Throwable> outcomes = race(
+				() -> {
+					carService.delete(deleted.getId(), true);
+					return null;
+				},
+				() -> carService.sell(sold.getId(), new SellCarRequest(PRICE, client.getId())));
+
+		assertThat(outcomes).containsOnlyNulls();
+		assertThat(purchasesCount(client)).isEqualTo(1);
+		assertThat(transactionRepository.findAll())
+				.singleElement()
+				.satisfies(transaction -> assertThat(transaction.getCar().getId()).isEqualTo(sold.getId()));
+	}
+
+	/**
+	 * The lock order of AC C.1.d: a {@code PUT} that locks two partners takes the lower id first,
+	 * whatever the request's order. A sold consignment car moves from partner {@code high} to partner
+	 * {@code low} while another connection holds {@code low}: the {@code PUT} has to be waiting on
+	 * {@code low} while {@code high} is still free (in the request's order it would hold {@code high}
+	 * and wait on {@code low}, and a {@code PUT} moving another car the other way would deadlock with
+	 * it, {@code 40P01}). Probed with {@code NOWAIT}, so the result does not depend on timing.
+	 *
+	 * @throws Exception from the holding or probing connections, or the worker
+	 */
+	@Test
+	void aPutLockingTwoPartnersTakesTheLowerIdFirst() throws Exception {
+		List<Partner> partners = new ArrayList<>(List.of(aPartner("Parceiro 1"), aPartner("Parceiro 2")));
+		partners.sort(Comparator.comparing(partner -> partner.getId().toString()));
+		Partner low = partners.get(0);
+		Partner high = partners.get(1);
+		Car moved = carRepository.saveAndFlush(aConsignmentCar(high, "100.00").build());
+		carService.sell(moved.getId(), new SellCarRequest(PRICE, null));
+
+		ExecutorService pool = Executors.newSingleThreadExecutor();
+		try (Connection holding = dataSource.getConnection(); Connection probing = dataSource.getConnection()) {
+			holding.setAutoCommit(false);
+			lockPartnerRow(holding, low, "");
+			Future<?> edit;
+			boolean highFreeWhileWaitingOnLow;
+			try {
+				edit = pool.submit(() -> carService.update(moved.getId(), aConsignmentEdit(low, "100.00")));
+				awaitWaitingOnLocks(1);
+				highFreeWhileWaitingOnLow = lockPartnerRow(probing, high, " NOWAIT");
+			} finally {
+				holding.commit();
+			}
+
+			edit.get(30, TimeUnit.SECONDS);
+			assertThat(highFreeWhileWaitingOnLow).as("partner with the higher id still free").isTrue();
+			assertThat(partnerRepository.findById(high.getId()).orElseThrow().getCarsCount()).isZero();
+			assertThat(partnerRepository.findById(low.getId()).orElseThrow().getCarsCount()).isEqualTo(1);
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	/**
+	 * Locks a partner's row as {@code findByIdForUpdate} does ({@code FOR NO KEY UPDATE}) on the
+	 * given connection; with auto-commit on, the lock is released at once.
+	 *
+	 * @return {@code true} if the row was locked, {@code false} if {@code NOWAIT} found it locked
+	 *     ({@code 55P03})
+	 */
+	private static boolean lockPartnerRow(Connection connection, Partner partner, String nowait) throws SQLException {
+		try (PreparedStatement statement =
+				connection.prepareStatement("SELECT id FROM partners WHERE id = ? FOR NO KEY UPDATE" + nowait)) {
+			statement.setObject(1, partner.getId());
+			try (ResultSet row = statement.executeQuery()) {
+				return row.next();
+			}
+		} catch (SQLException failed) {
+			if ("55P03".equals(failed.getSQLState())) {
+				return false;
+			}
+			throw failed;
+		}
 	}
 
 	/**
@@ -443,6 +636,20 @@ class CarSaleConcurrencyTest extends AbstractPostgresIntegrationTest {
 
 	private Partner aPartner(String name) {
 		return partnerRepository.saveAndFlush(Partner.builder().name(name).build());
+	}
+
+	/** An edit of an {@link #aCar()} that only changes the model, without consignment. */
+	private static CarRequest anEdit(String modelo) {
+		return new CarRequest(
+				"Audi", modelo, 2019, new BigDecimal("22000.00"), 80000, "Branco", "Gasolina", "Manual", "Nacional",
+				null, null, null, null, null, null, null, null, null, null, null);
+	}
+
+	/** An edit of an {@link #aCar()} that puts it in consignment with this partner and commission. */
+	private static CarRequest aConsignmentEdit(Partner partner, String commission) {
+		return new CarRequest(
+				"Audi", "A4", 2019, new BigDecimal("22000.00"), 80000, "Branco", "Gasolina", "Manual", "Nacional",
+				null, null, null, null, true, partner.getId(), new BigDecimal(commission), 0, null, null, null);
 	}
 
 	private static Car.CarBuilder aConsignmentCar(Partner partner, String commission) {
