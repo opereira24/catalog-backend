@@ -94,8 +94,8 @@ class PartnerDeleteConcurrencyTest extends AbstractPostgresIntegrationTest {
 
 		Outcomes outcomes = deletionDecidingFirst(partner, () -> carService.update(car.getId(), aConsignmentEdit(partner, "A6")));
 
-		assertThat(outcomes.deletion()).isNull();
-		assertThat(outcomes.writer()).isInstanceOf(DataIntegrityViolationException.class);
+		assertThat(outcomes.deletion()).as("deletion outcome").isNull();
+		assertThat(outcomes.writer()).as("PUT outcome").isInstanceOf(DataIntegrityViolationException.class);
 		assertThat(partnerRepository.existsById(partner.getId())).isFalse();
 		Car reloaded = carRepository.findById(car.getId()).orElseThrow();
 		assertThat(reloaded.getPartner()).isNull();
@@ -132,7 +132,7 @@ class PartnerDeleteConcurrencyTest extends AbstractPostgresIntegrationTest {
 				writer.commit();
 			}
 
-			assertThat(outcomeOf(deletion)).isInstanceOf(ResourceInUseException.class);
+			assertThat(outcomeOf(deletion)).as("deletion outcome").isInstanceOf(ResourceInUseException.class);
 			assertThat(partnerRepository.existsById(partner.getId())).isTrue();
 			assertThat(jdbcTemplate.queryForObject("SELECT partner_id FROM cars WHERE id = ?", UUID.class, car.getId()))
 					.isEqualTo(partner.getId());
@@ -155,8 +155,8 @@ class PartnerDeleteConcurrencyTest extends AbstractPostgresIntegrationTest {
 
 		Outcomes outcomes = deletionDecidingFirst(partner, () -> carService.create(aConsignmentEdit(partner, "A4")));
 
-		assertThat(outcomes.deletion()).isNull();
-		assertThat(outcomes.writer()).isInstanceOf(DataIntegrityViolationException.class);
+		assertThat(outcomes.deletion()).as("deletion outcome").isNull();
+		assertThat(outcomes.writer()).as("POST outcome").isInstanceOf(DataIntegrityViolationException.class);
 		assertThat(partnerRepository.existsById(partner.getId())).isFalse();
 		assertThat(carRepository.count()).isZero();
 		assertThat(outcomes.waitingBeforeTheGateOpened()).as("deletion and POST both waiting on a lock").isEqualTo(2);

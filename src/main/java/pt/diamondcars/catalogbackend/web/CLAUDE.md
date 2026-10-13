@@ -180,6 +180,13 @@ transação de venda corre antes do portão abrir, e só pede `FOR KEY SHARE` à
 Para provar uma corrida contra um `DELETE` (K8) o portão é a própria ligação que apagou a linha sem
 commit.
 
+Quando o escritor tem de ser apanhado **depois** da sua verificação de FK (TASK-015, K-PD1/K-PD3), o
+portão é só a tabela que o decisor escreve (`LOCK TABLE partners IN SHARE MODE`), nunca a do escritor
+(`cars`): esta prendia o `UPDATE`/`INSERT` antes da FK e a ordem passava a ser arbitrária. Para o
+cenário inverso (o escritor grava primeiro, K-PD2) o portão é a ligação do escritor sem commit, como
+no K8. Com 2 workers no máximo (+ portão + a query de espera) cabe no pool por omissão:
+`@SpringBootTest` simples, contexto em cache partilhado, sem `@DirtiesContext`.
+
 ## Clientes e parceiros (TASK-004)
 
 `/api/backoffice/clients` e `/api/backoffice/partners` seguem a mesma convenção dos carros, com
@@ -208,9 +215,25 @@ um parceiro carregado com `PartnerRepository#findByIdForUpdate` (linha trancada)
 `findByIdForUpdate` (TASK-010): o Hibernate grava a linha inteira com os valores que leu, por isso
 editar o nome durante uma venda repunha o contador antigo (K5/K6), e um `delete` sem lock podia
 passar o "não tem carros" no instante em que uma venda lhe atribuía um (K7). No `delete` o lock vem
-antes do `existsByClientId`. `PartnerService#delete` **não** tranca: a corrida dele é contra a
-verificação de FK do `create`/`PUT` de carros (`FOR KEY SHARE`), que um `FOR NO KEY UPDATE` não
-trava; fica para a TASK-015 (`FOR UPDATE` explícito).
+antes do `existsByClientId`.
+
+`PartnerService#delete` tranca com **`FOR UPDATE`** (TASK-015), não com `findByIdForUpdate`:
+`PartnerRepository#findByIdForDelete` é uma query nativa (`SELECT p.* ... FOR UPDATE`, nenhum
+`LockModeType` do Hibernate do Boot 4.1.1 o gera em PostgreSQL) e devolve a entidade, que é a que o
+`DELETE` remove. Ordem: lock → `existsByPartnerId` → `DELETE`. Porquê: gravar um carro com
+`partner_id = P` (`INSERT` do `POST`, `UPDATE` do `PUT`) pede `FOR KEY SHARE` a P (verificação de
+FK) até ao commit, e dos modos de lock de linha só `FOR UPDATE` conflita com ele. Com o lock à
+cabeça, ou o carro grava primeiro e o `delete` espera pelo commit e vê-o no `EXISTS` (409
+`ResourceInUseException`), ou o `delete` tranca primeiro e o carro espera e falha a FK quando o
+`delete` faz commit: o `POST`/`PUT` que perde recebe 409 `Pedido em conflito com o estado atual dos
+dados` (`ApiExceptionHandler#handleDataIntegrityViolation`, `ApiExceptionHandlerTest`), nada gravado;
+um pedido novo dá o 404 normal de parceiro inexistente. Sem lock, com `FOR NO KEY UPDATE`, ou com o
+`EXISTS` antes do lock, as duas operações têm sucesso e o `ON DELETE SET NULL` tira o parceiro ao
+carro acabado de gravar. Provado por `service/PartnerDeleteConcurrencyTest`: K-PD1 (`delete` decide
+primeiro, `PUT` concorrente), K-PD2 (carro gravado sem commit, `delete` concorrente; o único que
+apanha o `EXISTS` antes do lock), K-PD3 (`delete` decide primeiro, `POST` concorrente). Não é o lock
+geral do parceiro: bloqueia também as verificações de FK de quem só referencia P (vendas,
+transações); os contadores continuam com `findByIdForUpdate`.
 
 ## Transações e finanças (TASK-005)
 
@@ -348,7 +371,9 @@ Regras (cada uma com o cenário que a prova):
 - **SQL real**: no Hibernate do Boot 4.1.1 o `PESSIMISTIC_WRITE` em PostgreSQL é `for no key update`.
   Não entra em conflito com o `FOR KEY SHARE` das verificações de FK: gravar um lead ou uma transação
   manual com esse `car_id` não espera por uma venda nem por um `PUT`; só o `DELETE` do carro os
-  bloqueia. O `POST /api/leads` pede `CarRepository#lockKeyShare` (`FOR KEY SHARE`, o lock mais fraco
+  bloqueia. `FOR SHARE` também não conflita com `FOR KEY SHARE` (medido, TASK-015): contra o `DELETE`
+  de um pai que verifica antes se tem filhos, só `FOR UPDATE` serve (ver `PartnerService#delete` em
+  "Clientes e parceiros"). O `POST /api/leads` pede `CarRepository#lockKeyShare` (`FOR KEY SHARE`, o lock mais fraco
   que trava um `DELETE`) e depois `getReferenceById`: se o `DELETE` já tem a linha, o lead espera e
   grava sem carro; se o lead chega primeiro, o `DELETE` espera e o `ON DELETE SET NULL` limpa-o.
 - **Rejeitado**: `@Version` em `Car` (coluna nova, e não protege as linhas de parceiro/cliente
