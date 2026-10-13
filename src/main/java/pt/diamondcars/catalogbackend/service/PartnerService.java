@@ -118,6 +118,15 @@ public class PartnerService {
 	 * Deletes a partner, refusing when it still has consignment cars associated rather than
 	 * deleting it silently and orphaning those cars' {@code partner_id}.
 	 *
+	 * <p>Order: lock the partner's row with {@code FOR UPDATE} ({@link
+	 * PartnerRepository#findByIdForDelete}, TASK-015), then check for cars, then {@code DELETE}. The
+	 * lock conflicts with the {@code FOR KEY SHARE} PostgreSQL takes on this row while a concurrent
+	 * {@code POST}/{@code PUT} of a car saves {@code partner_id} = this partner: if the car saved
+	 * first, the lock waits for its commit and the check, a new statement in {@code READ COMMITTED},
+	 * sees it (409); if the lock came first, the car's foreign key check waits and fails once this
+	 * deletion commits (that request gets 409, nothing saved). Without the lock, or with checking
+	 * before locking, both succeed and {@code ON DELETE SET NULL} leaves the car without partner.
+	 *
 	 * @param id the partner's id
 	 * @throws ResourceNotFoundException if no partner has this id (mapped to 404)
 	 * @throws ResourceInUseException if at least one car still references this partner (mapped to
@@ -125,7 +134,9 @@ public class PartnerService {
 	 */
 	@Transactional
 	public void delete(UUID id) {
-		Partner partner = findOrThrow(id);
+		Partner partner = partnerRepository
+				.findByIdForDelete(id)
+				.orElseThrow(() -> new ResourceNotFoundException("Parceiro nao encontrado: " + id));
 		if (carRepository.existsByPartnerId(id)) {
 			throw new ResourceInUseException("Parceiro tem carros de consignacao associados: " + id);
 		}
