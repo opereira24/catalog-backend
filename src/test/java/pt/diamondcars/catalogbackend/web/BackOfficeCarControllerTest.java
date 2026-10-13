@@ -33,6 +33,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -73,7 +74,8 @@ import tools.jackson.databind.node.ObjectNode;
  * same method names (the TASK-003 AC I.1 table and its script check them); only the package, the
  * path prefix and the {@code observacoes} argument of {@link CarRequest} changed. The tests after
  * them are new (AC I.4). Then TASK-010: the 7 tests of that class about update, delete, sale and
- * reversal (AC D.1, same method names), and the new ones of its AC D.3/D.5.
+ * reversal (AC D.1, same method names), and the new ones of its AC D.3/D.5. Last, TASK-014: the
+ * scale of the money fields (AC B).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
@@ -2190,6 +2192,63 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 				.perform(delete("/api/backoffice/cars/{id}", car.getId()).with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
 				.andExpect(status().isNoContent());
 		mockMvc.perform(get("/api/cars/{id}", car.getId())).andExpect(status().isNotFound());
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// New in TASK-014 (AC B): money fields have at most 2 decimal places
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * AC B.1: a money field with 3 decimal places is a 400 naming the field, and nothing is stored.
+	 * Before the {@code @Digits}, it was a 201 that echoed the unrounded value while {@code
+	 * NUMERIC(12,2)} stored it rounded. Each value is inside the field's {@code @DecimalMin}/{@code
+	 * @DecimalMax}, so only the {@code @Digits} can refuse it; only the {@code field:} prefix is
+	 * asserted, the Bean Validation text depends on the JVM's {@code Locale}.
+	 *
+	 * @param field the money field under test, and the prefix the message must start with
+	 * @param value a value with 3 decimal places, otherwise valid for that field
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@ParameterizedTest(name = "{0} = {1}")
+	@CsvSource({"preco, 22000.005", "precoCompra, 18000.005", "commissionValue, 750.005"})
+	void moneyFieldsRejectMoreThanTwoDecimalPlaces(String field, BigDecimal value) throws Exception {
+		ObjectNode body = validBody();
+		body.put(field, value);
+
+		mockMvc
+				.perform(postJson("/api/backoffice/cars", body).with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value(startsWith(field + ": ")));
+		assertThat(carRepository.count()).isZero();
+	}
+
+	/**
+	 * AC B.2: money fields with up to 2 decimal places (and a zero commission: {@code @Digits} does
+	 * not imply positive) are created, and the read-back has exactly the stored scale. Asserted on the
+	 * body text: JsonPath parses {@code 22000.50} into a {@code double} and drops the trailing zero.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void moneyFieldsWithTwoDecimalPlacesAreStoredAsSent() throws Exception {
+		ObjectNode body = validBody();
+		body.put("preco", new BigDecimal("22000.5"));
+		body.put("precoCompra", new BigDecimal("18000.25"));
+		body.put("commissionValue", BigDecimal.ZERO);
+
+		String location = mockMvc
+				.perform(postJson("/api/backoffice/cars", body).with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isCreated())
+				.andReturn()
+				.getResponse()
+				.getHeader("Location");
+
+		mockMvc
+				.perform(get(location).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk())
+				.andExpect(content().string(containsString("\"preco\":22000.50")))
+				.andExpect(content().string(containsString("\"precoCompra\":18000.25")))
+				.andExpect(content().string(containsString("\"commissionValue\":0.00")));
 	}
 
 	// ---------------------------------------------------------------------------------------------

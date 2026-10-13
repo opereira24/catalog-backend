@@ -2,6 +2,7 @@ package pt.diamondcars.catalogbackend.web.dto;
 
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -33,6 +34,14 @@ import pt.diamondcars.catalogbackend.web.dto.validation.MaxCurrentYearPlusOne;
  *       a body that omits the key with a 400 that names no field, and the real {@code dcbo} form
  *       never sends {@code destaque}.
  *   <li>{@link #observacoes} is new (public text the site shows, had no writer).
+ *   <li>{@code @Digits(integer = 8, fraction = 2)} on {@link #preco}, {@link #precoCompra} and
+ *       {@link #commissionValue} (TASK-014): {@code NUMERIC(12,2)} rounds {@code 22000.005} to
+ *       {@code 22000.01} without error, but the {@code 201} echoed {@code 22000.005} (the entity in
+ *       memory is not re-read), so the response lied about what was stored. Same pair as {@link
+ *       TransactionRequest#valor()}: {@value #PRICE_MAX_VALUE} has 8 integer digits, so {@code
+ *       @Digits} never refuses a value {@code @DecimalMax} accepts. The scale is counted as sent,
+ *       trailing zeros included: {@code 22000.500} is a 400 ({@code dcbo} sends JS numbers, which
+ *       never carry them).
  * </ul>
  *
  * <p>Null semantics (AC C.3). On create: {@code observacoes} null or blank is stored as {@code
@@ -45,7 +54,8 @@ import pt.diamondcars.catalogbackend.web.dto.validation.MaxCurrentYearPlusOne;
  * @param marca brand, required, max 100, no special characters ({@link #NO_SPECIAL_CHARS_REGEXP})
  * @param modelo model, required, max 100, no special characters
  * @param ano model year, required, from 1950 to next calendar year
- * @param preco sale price, required, from 100 to {@value #PRICE_MAX_VALUE}
+ * @param preco sale price, required, from 100 to {@value #PRICE_MAX_VALUE}, at most 2 decimal
+ *     places
  * @param km odometer reading, required, from 0 to 1 000 000
  * @param cor colour, required, max 50, no special characters
  * @param combustivel fuel type, required, max 50 (the column size)
@@ -54,13 +64,14 @@ import pt.diamondcars.catalogbackend.web.dto.validation.MaxCurrentYearPlusOne;
  * @param descricao free-text description, optional, max 1000
  * @param observacoes longer public notes, optional, max 1000 ({@code LIMITS.TEXT_LONG} of {@code
  *     dcbo}); null or blank is stored as {@code null}
- * @param precoCompra purchase price, optional, from 0 to {@value #PRICE_MAX_VALUE}
+ * @param precoCompra purchase price, optional, from 0 to {@value #PRICE_MAX_VALUE}, at most 2
+ *     decimal places
  * @param dataCompra purchase date ({@code yyyy-MM-dd}), optional
  * @param isConsignacao whether the car is sold on consignment for {@link #partnerId}; null is
  *     {@code false}
  * @param partnerId consignment partner, optional; an id that does not exist is a 404
  * @param commissionValue commission owed to the partner on sale, optional, from 0 to {@value
- *     #PRICE_MAX_VALUE}
+ *     #PRICE_MAX_VALUE}, at most 2 decimal places
  * @param garantiaMeses warranty in months, optional, at least 0; null is 0
  * @param destaque whether the car is featured; null is {@code false}; subject to the 8-car limit
  * @param images ordered photo URLs, at most {@value #IMAGES_MAX}, each non-blank and at most 1000
@@ -73,7 +84,11 @@ public record CarRequest(
 		@NotBlank @Size(max = 100) @Pattern(regexp = CarRequest.NO_SPECIAL_CHARS_REGEXP) String marca,
 		@NotBlank @Size(max = 100) @Pattern(regexp = CarRequest.NO_SPECIAL_CHARS_REGEXP) String modelo,
 		@NotNull @Min(1950) @MaxCurrentYearPlusOne Integer ano,
-		@NotNull @DecimalMin("100") @DecimalMax(CarRequest.PRICE_MAX_VALUE) BigDecimal preco,
+		@NotNull
+		@DecimalMin("100")
+		@DecimalMax(CarRequest.PRICE_MAX_VALUE)
+		@Digits(integer = 8, fraction = 2)
+		BigDecimal preco,
 		@NotNull @Min(0) @Max(1_000_000) Integer km,
 		@NotBlank @Size(max = 50) @Pattern(regexp = CarRequest.NO_SPECIAL_CHARS_REGEXP) String cor,
 		@NotBlank @Size(max = 50) String combustivel,
@@ -81,11 +96,13 @@ public record CarRequest(
 		@NotBlank @Size(max = 100) String origem,
 		@Size(max = CarRequest.TEXT_LONG_MAX) String descricao,
 		@Size(max = CarRequest.TEXT_LONG_MAX) String observacoes,
-		@DecimalMin("0") @DecimalMax(CarRequest.PRICE_MAX_VALUE) BigDecimal precoCompra,
+		@DecimalMin("0") @DecimalMax(CarRequest.PRICE_MAX_VALUE) @Digits(integer = 8, fraction = 2)
+		BigDecimal precoCompra,
 		LocalDate dataCompra,
 		Boolean isConsignacao,
 		UUID partnerId,
-		@DecimalMin("0") @DecimalMax(CarRequest.PRICE_MAX_VALUE) BigDecimal commissionValue,
+		@DecimalMin("0") @DecimalMax(CarRequest.PRICE_MAX_VALUE) @Digits(integer = 8, fraction = 2)
+		BigDecimal commissionValue,
 		@Min(0) Integer garantiaMeses,
 		Boolean destaque,
 		@Size(max = CarRequest.IMAGES_MAX) List<@NotBlank @Size(max = CarRequest.URL_MAX) String> images,
