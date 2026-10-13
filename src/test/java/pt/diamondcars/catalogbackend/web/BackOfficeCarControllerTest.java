@@ -355,6 +355,11 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 	/**
 	 * C10: the listing is most recently created first by default.
 	 *
+	 * <p>The {@code created_at} values are set apart explicitly (TASK-010): {@code @CreationTimestamp}
+	 * reads the JVM clock, which on Windows advances in ~15.6 ms ticks, so three saves in a row often
+	 * got the same instant and the {@code id} tie-breaker (random UUIDs) decided the order. Measured: 1
+	 * failure in 4 runs on the developer's machine before this change.
+	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
@@ -362,6 +367,14 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 		Car first = carRepository.saveAndFlush(aPersistedCar().modelo("First").build());
 		Car second = carRepository.saveAndFlush(aPersistedCar().modelo("Second").build());
 		Car third = carRepository.saveAndFlush(aPersistedCar().modelo("Third").build());
+		Instant base = Instant.parse("2026-10-01T12:00:00Z");
+		List<Car> inCreationOrder = List.of(first, second, third);
+		for (int i = 0; i < inCreationOrder.size(); i++) {
+			jdbcTemplate.update(
+					"UPDATE cars SET created_at = ? WHERE id = ?",
+					Timestamp.from(base.plusSeconds(i)),
+					inCreationOrder.get(i).getId());
+		}
 
 		mockMvc
 				.perform(get("/api/backoffice/cars").with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
