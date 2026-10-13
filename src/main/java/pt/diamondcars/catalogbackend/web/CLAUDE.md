@@ -52,6 +52,13 @@ back-office. Cada ponto tem um teste que o prova.
   conflito com o estado atual dos dados` (`DataIntegrityViolationException`), um código errado
   para um erro de input. A mensagem 400 é `campo: mensagem`, com `images[1]` para um elemento;
   os testes afirmam só o prefixo `campo: ` (o texto do Bean Validation depende do `Locale`).
+- Todo o campo monetário de um pedido (`CarRequest.preco`/`precoCompra`/`commissionValue`,
+  `TransactionRequest.valor`, `SellCarRequest.precoVenda`) tem `@Digits(integer = 8, fraction = 2)`
+  ao lado do teto `CarRequest.PRICE_MAX_VALUE`. Sem ele, o `NUMERIC(12,2)` arredonda `22000.005`
+  para `22000.01` sem erro e o 201/200 ecoa `22000.005` (a entidade em memória não é relida). O
+  `@Digits` conta a escala tal como chega e **não ignora zeros à direita**: `22000.500` ou `0.000`
+  dão 400 (aceite: o `dcbo` envia números JS, que nunca os têm). Teste da escala gravada: afirmar o
+  texto do corpo (`"preco":22000.50`), não o JsonPath, que perde o zero.
 
 ## Semântica de nulo do `CarRequest`
 
