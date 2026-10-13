@@ -56,12 +56,13 @@ public class PartnerService {
 	 * Lists partners, most recently created first by default.
 	 *
 	 * @param pageable pagination/sorting, defaulted by the controller to 50 per page sorted by
-	 *     {@code createdAt} descending
+	 *     {@code createdAt} descending; {@code id} DESC is appended when the sort lacks it ({@link
+	 *     StableSort#withIdTiebreak})
 	 * @return the requested page, mapped to {@link PartnerResponse}
 	 */
 	@Transactional(readOnly = true)
 	public Page<PartnerResponse> list(Pageable pageable) {
-		return partnerRepository.findAll(pageable).map(PartnerResponse::from);
+		return partnerRepository.findAll(StableSort.withIdTiebreak(pageable)).map(PartnerResponse::from);
 	}
 
 	/**

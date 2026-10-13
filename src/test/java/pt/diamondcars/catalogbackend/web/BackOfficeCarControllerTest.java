@@ -1129,6 +1129,43 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
+	 * TASK-013, B.2: a {@code ?sort=} from the client replaces the {@code @PageableDefault} (and its
+	 * {@code id}) entirely, so the service appends {@code id} DESC. Three cars with the same {@code
+	 * preco}, inserted by SQL in ascending {@code id}: without the tie-breaker PostgreSQL returns the
+	 * heap order {@code 01, 02, 03} (mutation 2 of AC B.6), with it {@code 03, 02, 01}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aClientRequestedSortOnCarsHasIdAsLastTiebreaker() throws Exception {
+		Timestamp createdAt = Timestamp.from(Instant.parse("2026-10-01T12:00:00Z"));
+		List<String> ascendingIds = List.of(
+				"00000000-0000-0000-0000-000000000001",
+				"00000000-0000-0000-0000-000000000002",
+				"00000000-0000-0000-0000-000000000003");
+		for (String id : ascendingIds) {
+			jdbcTemplate.update(
+					"INSERT INTO cars (id, marca, modelo, ano, preco, km, cor, combustivel, transmissao, origem,"
+							+ " created_at, updated_at) VALUES (?::uuid, 'Audi', 'A4', 2019, 22000, 80000, 'Branco',"
+							+ " 'Gasolina', 'Manual', 'stand', ?, ?)",
+					id, createdAt, createdAt);
+		}
+		jdbcTemplate.execute("ANALYZE cars");
+
+		List<String> paged = new ArrayList<>();
+		for (int page = 0; page < ascendingIds.size(); page++) {
+			JsonNode content = getJson(get("/api/backoffice/cars")
+					.param("sort", "preco,asc")
+					.param("size", "1")
+					.param("page", String.valueOf(page)))
+					.get("content");
+			content.forEach(car -> paged.add(car.get("id").asString()));
+		}
+
+		assertThat(paged).containsExactlyElementsOf(ascendingIds.reversed());
+	}
+
+	/**
 	 * AC D.4: listing 100 cars with a partner, a client and 3 photos each runs at most 5 statements
 	 * (cars, count, 2 batches of photos, the active-user lookup): partner and client are never
 	 * loaded. Fails if someone maps a partner field into the DTO (one query per car).

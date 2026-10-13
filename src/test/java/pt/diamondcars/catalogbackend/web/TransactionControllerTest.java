@@ -72,6 +72,11 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	private static final String PATH = "/api/backoffice/transactions";
 	private static final String USER_ROLE = "ROLE_USER";
 	private static final String ADMIN_ROLE = "ROLE_ADMIN";
+	/** Fixed ids in the order they are inserted (TASK-013): the heap order of a three-way tie. */
+	private static final List<String> ASCENDING_IDS = List.of(
+			"00000000-0000-0000-0000-000000000001",
+			"00000000-0000-0000-0000-000000000002",
+			"00000000-0000-0000-0000-000000000003");
 
 	/** The 12 keys of AC B.2. A literal, so a component added or renamed by accident fails here. */
 	private static final List<String> TRANSACTION_KEYS = List.of(
@@ -685,6 +690,35 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 		}
 
 		assertThat(paged).containsExactly(nextDay, laterSameDayHighId, laterSameDayLowId, earlierSameDay);
+	}
+
+	/**
+	 * TASK-013, B.1: a {@code ?sort=} from the client replaces the {@code @PageableDefault} (and its
+	 * {@code id}) entirely, so the service appends {@code id} DESC. Three transactions with the same
+	 * {@code valor} (and the same {@code data} and {@code createdAt}), inserted by SQL in ascending
+	 * {@code id}: without the tie-breaker PostgreSQL returns the heap order {@code 01, 02, 03}
+	 * (mutation 1 of AC B.6), with it {@code 03, 02, 01}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aClientRequestedSortHasIdAsLastTiebreaker() throws Exception {
+		Timestamp createdAt = Timestamp.from(Instant.parse("2026-03-10T09:00:00Z"));
+		for (String id : ASCENDING_IDS) {
+			insertTransaction(id, LocalDate.of(2026, 3, 10), createdAt);
+		}
+		jdbcTemplate.execute("ANALYZE transactions");
+
+		List<String> paged = new ArrayList<>();
+		for (int page = 0; page < ASCENDING_IDS.size(); page++) {
+			JsonNode listing = getJson(get(PATH)
+					.param("sort", "valor,asc")
+					.param("size", "1")
+					.param("page", String.valueOf(page)));
+			listing.get("content").forEach(transaction -> paged.add(transaction.get("id").asString()));
+		}
+
+		assertThat(paged).containsExactlyElementsOf(ASCENDING_IDS.reversed());
 	}
 
 	/**
