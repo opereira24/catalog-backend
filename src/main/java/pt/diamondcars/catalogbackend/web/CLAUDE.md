@@ -76,6 +76,16 @@ no `PUT`.
   dele é o `CarQueryService#MAX_PAGE_SIZE` (60).
 - `@PageableDefault(sort = {"createdAt", "id"})`: o `id` desempata carros com o mesmo
   `createdAt`, senão as páginas repetem ou saltam carros.
+- **Todas as listagens paginadas do back-office acabam em `id` DESC** (carros, transações,
+  clientes, parceiros; TASK-013): o serviço passa o `Pageable` por `service/StableSort#withIdTiebreak`
+  antes da query, que acrescenta `id` DESC quando a ordem não tem `id` (se já tem, em qualquer
+  posição ou direção, fica como pedido). Porquê: um `?sort=` do cliente **substitui** o
+  `@PageableDefault` inteiro, e o `id` do default perde-se; com `?sort=valor,asc` três linhas com o
+  mesmo `valor` vinham na ordem física do heap e as páginas repetiam ou saltavam linhas. Nos
+  serviços com allow-list a chamada vem **depois** de `requireSortable` (a validação vê só o que o
+  cliente pediu). Uma listagem nova com `Pageable` chama o mesmo helper. Provado por um teste por
+  listagem (`...HasIdAsLastTiebreaker...`): 3 linhas empatadas inseridas por SQL com ids `01, 02, 03`
+  por essa ordem, `ANALYZE`, `size=1`; com o desempate `03, 02, 01`, sem ele `01, 02, 03`.
 - `sort` só aceita propriedades escalares da entidade (`BackOfficeCarService#SORTABLE_PROPERTIES`),
   validado antes da query: 400 `Campo de ordenacao desconhecido: <prop>`. Porquê: o Spring Data
   aceita caminhos por associações como junções. Medido no `dcbo-backend`: `sort=images.url&size=1`
@@ -173,6 +183,10 @@ duas diferenças deliberadas:
   não há junção para uma ordenação maliciosa explorar. O handler genérico de
   `PropertyReferenceException` (TASK-003 AC H) já responde 400 a qualquer propriedade
   inexistente; uma allow-list só se justifica para bloquear uma junção real.
+- **Ordem por omissão `createdAt` DESC, desempatada por `id` DESC** (TASK-013, via
+  `StableSort#withIdTiebreak` no serviço; o `@PageableDefault` dos controllers continua só com
+  `createdAt`). Antes, clientes ou parceiros com o mesmo `created_at` repetiam ou saltavam entre
+  páginas mesmo sem `?sort=` (medido pelo arquiteto: ordem física `01, 02, 03`).
 - **`ResourceInUseException` (409)** em vez de deixar o `DataIntegrityViolationException` da FK
   chegar ao cliente: `ClientService#delete`/`PartnerService#delete` verificam
   `existsByClientId`/`existsByPartnerId` antes de apagar, com a mensagem a nomear o recurso.
