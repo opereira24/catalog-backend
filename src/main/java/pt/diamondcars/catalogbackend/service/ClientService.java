@@ -94,7 +94,7 @@ public class ClientService {
 	 */
 	@Transactional
 	public ClientResponse update(UUID id, ClientRequest request) {
-		Client client = findOrThrow(id);
+		Client client = lockOrThrow(id);
 		applyRequest(client, request);
 		return ClientResponse.from(client);
 	}
@@ -110,7 +110,7 @@ public class ClientService {
 	 */
 	@Transactional
 	public void delete(UUID id) {
-		Client client = findOrThrow(id);
+		Client client = lockOrThrow(id);
 		if (carRepository.existsByClientId(id)) {
 			throw new ResourceInUseException("Cliente tem carros associados: " + id);
 		}
@@ -135,6 +135,19 @@ public class ClientService {
 	private Client findOrThrow(UUID id) {
 		return clientRepository
 				.findById(id)
+				.orElseThrow(() -> new ResourceNotFoundException("Cliente nao encontrado: " + id));
+	}
+
+	/**
+	 * Same as {@link #findOrThrow} with the client's row locked until the end of the transaction
+	 * (TASK-010 AC C.1.b), for the writes: {@link #update} (an unlocked edit next to a sale wrote the
+	 * old {@code purchases_count} back) and {@link #delete} (the lock is taken before the "has no
+	 * cars" check, so a sale to this client either commits first, and the check sees its car, or
+	 * waits and then finds no client).
+	 */
+	private Client lockOrThrow(UUID id) {
+		return clientRepository
+				.findByIdForUpdate(id)
 				.orElseThrow(() -> new ResourceNotFoundException("Cliente nao encontrado: " + id));
 	}
 

@@ -19,14 +19,15 @@ import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
 /**
  * Business logic for the whole {@code /api/backoffice/partners} surface (TASK-004), ported from
  * {@code dcbo-backend}'s {@code PartnerService}, plus the {@link #incrementCarsCount}/{@link
- * #decrementCarsCount}/{@link #registerCommission}/{@link #reverseCommission} hooks TASK-010's
- * {@code BackOfficeCarService} will call on sale/reversal to keep {@link Partner#getCarsCount()}/
- * {@link Partner#getTotalCommission()} in sync server-side. No caller exists yet in this task —
- * {@link PartnerServiceCountersTest} proves each hook correct in isolation.
+ * #decrementCarsCount}/{@link #registerCommission}/{@link #reverseCommission} hooks {@code
+ * BackOfficeCarService} calls on sale, reversal and edit of a sold consignment car (TASK-010) to
+ * keep {@link Partner#getCarsCount()}/{@link Partner#getTotalCommission()} in sync server-side. The
+ * caller hands them a partner it loaded with {@link PartnerRepository#findByIdForUpdate} (row
+ * locked); {@code PartnerServiceCountersTest} proves each hook in isolation.
  *
- * <p>Both counters are only ever touched by a sale and its reversal, never by a car's creation,
- * update, or deletion (TASK-003 AC G.1 already proves {@code create}/{@code reserve}/{@code
- * release-reservation}/{@code highlight} leave them untouched).
+ * <p>Both counters are only ever touched by a sale, its reversal, and the edit of an already sold
+ * consignment car (which moves what the sale registered); never by a car's creation, deletion, or
+ * the edit of an unsold car (TASK-003 AC G.1 and TASK-010 AC B.3/C.2).
  *
  * <p>Every public method is {@code @Transactional} and maps its result to a {@link
  * PartnerResponse}/{@link BackOfficeCarResponse} before returning: with {@code
@@ -93,6 +94,11 @@ public class PartnerService {
 	 * {@link Partner#getCarsCount()}/{@link Partner#getTotalCommission()}, which are only ever
 	 * changed by the hooks below.
 	 *
+	 * <p>Reads the partner with its row locked ({@link PartnerRepository#findByIdForUpdate}, TASK-010
+	 * AC C.1.b): Hibernate writes the whole row, counters included, with the values it read, so an
+	 * unlocked edit running next to a sale wrote the old {@code cars_count} back (measured: 0 instead
+	 * of 1).
+	 *
 	 * @param id the partner's id
 	 * @param request the validated payload
 	 * @return the updated partner
@@ -100,7 +106,9 @@ public class PartnerService {
 	 */
 	@Transactional
 	public PartnerResponse update(UUID id, PartnerRequest request) {
-		Partner partner = findOrThrow(id);
+		Partner partner = partnerRepository
+				.findByIdForUpdate(id)
+				.orElseThrow(() -> new ResourceNotFoundException("Parceiro nao encontrado: " + id));
 		applyRequest(partner, request);
 		return PartnerResponse.from(partner);
 	}
