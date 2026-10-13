@@ -2090,6 +2090,36 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
+	 * AC C.9: a consignment sale to a client runs a fixed number of statements, whatever the photos:
+	 * the active-user lookup, the 3 row locks (car, partner, client), the photos of the response (one
+	 * batch), the {@code INSERT} of the sale transaction and the 3 {@code UPDATE}s; its reversal the
+	 * same with a {@code SELECT} + {@code DELETE} of the sale transaction instead of the {@code
+	 * INSERT}. The response reads only the ids of partner and client, so a partner field mapped into
+	 * the DTO, or a lock that loads more than its row, fails here.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aConsignmentSaleAndItsReversalRunAFixedNumberOfStatements() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Auto Silva").build());
+		Car car = aPersistedCar().consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).build();
+		for (int position = 0; position < 3; position++) {
+			car.addImage(CarImage.builder().url("https://img/" + position + ".jpg").position(position).build());
+		}
+		Car saved = carRepository.saveAndFlush(car);
+
+		long saleStatements = countStatements(() -> mockMvc
+				.perform(sellRequest(saved.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId())))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.images.length()").value(3)));
+		long reversalStatements = countStatements(() -> getJson(post("/api/backoffice/cars/{id}/revert-sale", saved.getId())));
+
+		assertThat(saleStatements).isEqualTo(9);
+		assertThat(reversalStatements).isEqualTo(10);
+	}
+
+	/**
 	 * AC D.5 / requirement 5: after a {@code PUT}, a sale, a reversal and a deletion, the public
 	 * detail, listing and highlights show exactly the 18 public keys; a sold car leaves the listing
 	 * and the highlights (its detail still answers, with {@code vendido} true) and comes back after
@@ -2152,6 +2182,25 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 		return put("/api/backoffice/cars/{id}", carId)
 				.contentType(MediaType.APPLICATION_JSON)
 				.content(objectMapper.writeValueAsString(body));
+	}
+
+	/** Something {@link #countStatements} runs: a request, which may throw. */
+	@FunctionalInterface
+	private interface Request {
+		void perform() throws Exception;
+	}
+
+	/** Runs the request with Hibernate statistics on and returns the statements it prepared. */
+	private long countStatements(Request request) throws Exception {
+		Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+		statistics.setStatisticsEnabled(true);
+		statistics.clear();
+		try {
+			request.perform();
+			return statistics.getPrepareStatementCount();
+		} finally {
+			statistics.setStatisticsEnabled(false);
+		}
 	}
 
 	private int purchasesCount(Client client) {
