@@ -38,10 +38,10 @@ import pt.diamondcars.catalogbackend.web.dto.validation.MaxCurrentYearPlusOne;
  *       {@link #commissionValue} (TASK-014): {@code NUMERIC(12,2)} rounds {@code 22000.005} to
  *       {@code 22000.01} without error, but the {@code 201} echoed {@code 22000.005} (the entity in
  *       memory is not re-read), so the response lied about what was stored. Same pair as {@link
- *       TransactionRequest#valor()}: {@value #PRICE_MAX_VALUE} has 8 integer digits, so {@code
- *       @Digits} never refuses a value {@code @DecimalMax} accepts. The scale is counted as sent,
- *       trailing zeros included: {@code 22000.500} is a 400 ({@code dcbo} sends JS numbers, which
- *       never carry them).
+ *       TransactionRequest#valor()}: {@value #PRICE_MAX_VALUE} has 8 integer digits, so the
+ *       {@code @Digits} never refuses a value {@code @DecimalMax} accepts. The scale is counted as
+ *       sent, trailing zeros included: {@code 22000.500} is a 400 ({@code dcbo} sends JS numbers,
+ *       which never carry them).
  * </ul>
  *
  * <p>Null semantics (AC C.3). On create: {@code observacoes} null or blank is stored as {@code
