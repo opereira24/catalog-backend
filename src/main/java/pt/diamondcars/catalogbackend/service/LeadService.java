@@ -109,11 +109,21 @@ public class LeadService {
 	 * carroMarca}/{@code carroModelo} snapshot, and {@code origem} stays decided by the presence of
 	 * {@code carroId} in the request, not by whether the car exists.
 	 *
+	 * <p>The lookup takes {@code FOR KEY SHARE} on the car ({@link CarRepository#lockKeyShare},
+	 * TASK-010 AC C.8): since the back-office can delete cars, a car deleted between this lookup and
+	 * the {@code INSERT} of the lead made the insert fail on {@code leads_car_id_fkey} (409, lead
+	 * lost). With the lock, either the {@code DELETE} commits first and the lead is saved without car,
+	 * or the lead commits first and the {@code DELETE}'s {@code ON DELETE SET NULL} clears it. Then
+	 * {@code getReferenceById}: the lead only needs the id, no second {@code SELECT}.
+	 *
 	 * @param carroId the id sent by the public site, or {@code null} for a general contact
 	 * @return the matching car, or {@code null} when {@code carroId} is {@code null} or unknown
 	 */
 	private Car findCar(UUID carroId) {
-		return carroId == null ? null : carRepository.findById(carroId).orElse(null);
+		if (carroId == null) {
+			return null;
+		}
+		return carRepository.lockKeyShare(carroId).map(carRepository::getReferenceById).orElse(null);
 	}
 
 	/**

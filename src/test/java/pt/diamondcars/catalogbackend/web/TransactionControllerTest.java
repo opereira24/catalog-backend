@@ -48,6 +48,7 @@ import pt.diamondcars.catalogbackend.domain.transaction.Transaction;
 import pt.diamondcars.catalogbackend.domain.transaction.TransactionRepository;
 import pt.diamondcars.catalogbackend.domain.transaction.TransactionType;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
+import pt.diamondcars.catalogbackend.web.dto.SellCarRequest;
 import pt.diamondcars.catalogbackend.web.dto.TransactionRequest;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -60,9 +61,9 @@ import tools.jackson.databind.ObjectMapper;
  *
  * <p>The first 13 tests are ported from {@code dcbo-backend}'s {@code TransactionControllerTest}
  * with the same method names; only the package and the {@code /api/backoffice} prefix changed (plus
- * the 403 message and stricter assertions where the original only checked the status). The 6 tests
- * of that class that go through car endpoints belong to TASK-010. The tests after them are new (AC
- * D.1 a-m).
+ * the 403 message and stricter assertions where the original only checked the status). The tests after
+ * them are new (AC D.1 a-m). The 6 tests of that class that go through car endpoints come with
+ * TASK-010, in their own section, followed by the sale/summary tests of TASK-010.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
@@ -827,8 +828,274 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	// ---------------------------------------------------------------------------------------------
+	// Ported from dcbo-backend in TASK-010 (AC D.2, T1 to T6): the tests of that class that go
+	// through the car endpoints. Same method names; prefix /api/backoffice, ADMIN on the DELETE.
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * T1: selling a car creates a system-generated {@code venda} transaction for the sale price;
+	 * reverting the sale removes it.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingACarCreatesAVendaTransactionAndRevertingRemovesIt() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Cliente Teste").phone("912345678").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		sell(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId()));
+
+		assertThat(transactionRepository.findByCarId(car.getId())).hasSize(1);
+		Transaction saleTransaction = transactionRepository.findByCarId(car.getId()).get(0);
+		assertThat(saleTransaction.getTipo()).isEqualTo(TransactionType.VENDA);
+		assertThat(saleTransaction.getValor()).isEqualByComparingTo(new BigDecimal("21000.00"));
+		assertThat(saleTransaction.isSystemGenerated()).isTrue();
+
+		revertSale(car.getId());
+
+		assertThat(transactionRepository.findByCarId(car.getId())).isEmpty();
+	}
+
+	/**
+	 * T2: reverting a sale never removes a manual transaction that references the same car.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void revertingASaleNeverRemovesAManualTransactionForTheSameCar() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+		Transaction manualTransaction = transactionRepository.saveAndFlush(Transaction.builder()
+				.tipo(TransactionType.VENDA)
+				.valor(new BigDecimal("500.00"))
+				.data(LocalDate.of(2026, 1, 1))
+				.car(car)
+				.systemGenerated(false)
+				.build());
+
+		sell(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), null));
+		revertSale(car.getId());
+
+		assertThat(transactionRepository.findByCarId(car.getId()))
+				.extracting(Transaction::getId)
+				.containsExactly(manualTransaction.getId());
+	}
+
+	/**
+	 * T3: deleting a car (no {@code deleteTransactions}, so the default {@code true}) deletes its
+	 * transactions. Proved by id: {@code transactions.car_id} is {@code ON DELETE SET NULL}, so {@code
+	 * findByCarId} would also be empty if the rows were merely detached.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingACarRemovesItsTransactions() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+		Transaction first = transactionRepository.saveAndFlush(Transaction.builder()
+				.tipo(TransactionType.COMPRA)
+				.valor(new BigDecimal("18000.00"))
+				.data(LocalDate.of(2026, 1, 1))
+				.car(car)
+				.build());
+		Transaction second = transactionRepository.saveAndFlush(Transaction.builder()
+				.tipo(TransactionType.DESPESA)
+				.valor(new BigDecimal("300.00"))
+				.data(LocalDate.of(2026, 1, 5))
+				.car(car)
+				.build());
+
+		assertThat(transactionRepository.findByCarId(car.getId())).hasSize(2);
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId()).with(admin()))
+				.andExpect(status().isNoContent());
+
+		assertThat(transactionRepository.findAllById(List.of(first.getId(), second.getId()))).isEmpty();
+	}
+
+	/**
+	 * T4: {@code ?deleteTransactions=false} keeps the car's transactions, detached from it.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingACarWithDeleteTransactionsFalseKeepsItsTransactions() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+		Transaction kept = transactionRepository.saveAndFlush(Transaction.builder()
+				.tipo(TransactionType.COMPRA)
+				.valor(new BigDecimal("18000.00"))
+				.data(LocalDate.of(2026, 1, 1))
+				.car(car)
+				.build());
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId())
+						.queryParam("deleteTransactions", "false")
+						.with(admin()))
+				.andExpect(status().isNoContent());
+
+		Transaction reloaded = transactionRepository.findById(kept.getId()).orElseThrow();
+		assertThat(reloaded.getCar()).isNull();
+	}
+
+	/**
+	 * T5: deleting a sold car with {@code deleteTransactions=true} (the default) decrements the
+	 * buyer's {@code purchasesCount}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingASoldCarDecrementsTheBuyingClientsPurchasesCount() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Cliente Teste").phone("912345678").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+		sell(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId()));
+		assertThat(clientRepository.findById(client.getId()).orElseThrow().getPurchasesCount()).isEqualTo(1);
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId()).with(admin()))
+				.andExpect(status().isNoContent());
+
+		assertThat(clientRepository.findById(client.getId()).orElseThrow().getPurchasesCount()).isZero();
+	}
+
+	/**
+	 * T6: selling a consignment car creates the {@code venda} transaction for the partner's
+	 * commission, never the sale price; the summary counts the commission; the reversal removes it.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingAConsignmentCarCreatesAVendaTransactionForTheCommissionNotTheSalePrice() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Parceiro Teste").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true)
+				.partner(partner)
+				.commissionValue(new BigDecimal("1000.00"))
+				.build());
+
+		sell(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), null));
+
+		assertThat(transactionRepository.findByCarId(car.getId())).hasSize(1);
+		Transaction commissionTransaction = transactionRepository.findByCarId(car.getId()).get(0);
+		assertThat(commissionTransaction.getTipo()).isEqualTo(TransactionType.VENDA);
+		assertThat(commissionTransaction.getValor()).isEqualByComparingTo(new BigDecimal("1000.00"));
+		assertThat(commissionTransaction.getCategoria()).isEqualTo("comissao_venda");
+		assertThat(commissionTransaction.getPartner()).isNotNull();
+		assertThat(commissionTransaction.getPartner().getId()).isEqualTo(partner.getId());
+		assertThat(commissionTransaction.isSystemGenerated()).isTrue();
+
+		mockMvc
+				.perform(get("/api/backoffice/finances/summary").with(user()))
+				.andExpect(status().isOk())
+				.andExpect(content().string(containsString("\"totalReceitas\":1000.00")));
+
+		revertSale(car.getId());
+
+		assertThat(transactionRepository.findByCarId(car.getId())).isEmpty();
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// New in TASK-010 (AC D.3/D.4)
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * AC D.4: a sale made through the car API shows in the summary ({@code venda_veiculo}: {@code
+	 * totalReceitas} goes up by the sale price; consignment: by the commission) and the reversal brings
+	 * it back to the previous value. A manual {@code receita} and {@code despesa} beforehand make the
+	 * starting point non-zero. Asserted on the body text, which keeps the 2 decimal places.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void theFinanceSummaryReflectsASaleAndGoesBackAfterItsReversal() throws Exception {
+		saved(TransactionType.RECEITA, "100.00", LocalDate.of(2026, 1, 1));
+		saved(TransactionType.DESPESA, "40.00", LocalDate.of(2026, 1, 1));
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Parceiro Teste").build());
+		Car ownCar = carRepository.saveAndFlush(aPersistedCar().build());
+		Car consignmentCar = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true)
+				.partner(partner)
+				.commissionValue(new BigDecimal("750.25"))
+				.build());
+		String before = "{\"totalReceitas\":100.00,\"totalDespesas\":40.00,\"saldo\":60.00}";
+		assertThat(summary()).isEqualTo(before);
+
+		sell(ownCar.getId(), new SellCarRequest(new BigDecimal("20000.50"), null));
+		assertThat(summary()).isEqualTo("{\"totalReceitas\":20100.50,\"totalDespesas\":40.00,\"saldo\":20060.50}");
+
+		sell(consignmentCar.getId(), new SellCarRequest(new BigDecimal("30000.00"), null));
+		assertThat(summary()).isEqualTo("{\"totalReceitas\":20850.75,\"totalDespesas\":40.00,\"saldo\":20810.75}");
+
+		revertSale(ownCar.getId());
+		revertSale(consignmentCar.getId());
+		assertThat(summary()).isEqualTo(before);
+	}
+
+	/**
+	 * AC D.3: the sale transaction carries the buyer and, for a consignment sale, the partner; a
+	 * {@code venda_veiculo} has no partner, even when the car has one but is not in consignment.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void theSaleTransactionCarriesTheBuyerAndOnlyAConsignmentSaleCarriesThePartner() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Parceiro Teste").build());
+		Car consignmentCar = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true)
+				.partner(partner)
+				.commissionValue(new BigDecimal("500.00"))
+				.build());
+		Car ownCarWithPartner = carRepository.saveAndFlush(aPersistedCar().partner(partner).build());
+
+		sell(consignmentCar.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId()));
+		sell(ownCarWithPartner.getId(), new SellCarRequest(new BigDecimal("15000.00"), client.getId()));
+
+		JsonNode commission = getJson(get(PATH).param("carroId", consignmentCar.getId().toString())).get("content").get(0);
+		assertThat(commission.get("categoria").asString()).isEqualTo("comissao_venda");
+		assertThat(commission.get("descricao").asString()).isEqualTo("Comissao: Audi A4");
+		assertThat(commission.get("clienteId").asString()).isEqualTo(client.getId().toString());
+		assertThat(commission.get("partnerId").asString()).isEqualTo(partner.getId().toString());
+		assertThat(commission.get("systemGenerated").asBoolean()).isTrue();
+
+		JsonNode sale = getJson(get(PATH).param("carroId", ownCarWithPartner.getId().toString())).get("content").get(0);
+		assertThat(sale.get("categoria").asString()).isEqualTo("venda_veiculo");
+		assertThat(sale.get("descricao").asString()).isEqualTo("Venda: Audi A4");
+		assertThat(sale.get("valor").decimalValue()).isEqualByComparingTo("15000.00");
+		assertThat(sale.get("clienteId").asString()).isEqualTo(client.getId().toString());
+		assertThat(sale.get("partnerId").isNull()).isTrue();
+	}
+
+	// ---------------------------------------------------------------------------------------------
 	// Helpers
 	// ---------------------------------------------------------------------------------------------
+
+	private static RequestPostProcessor admin() {
+		return jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE));
+	}
+
+	private void sell(UUID carId, SellCarRequest request) throws Exception {
+		mockMvc
+				.perform(post("/api/backoffice/cars/{id}/sell", carId)
+						.with(user())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(request)))
+				.andExpect(status().isOk());
+	}
+
+	private void revertSale(UUID carId) throws Exception {
+		mockMvc
+				.perform(post("/api/backoffice/cars/{id}/revert-sale", carId).with(user()))
+				.andExpect(status().isOk());
+	}
+
+	private String summary() throws Exception {
+		return mockMvc
+				.perform(get("/api/backoffice/finances/summary").with(user()))
+				.andExpect(status().isOk())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+	}
 
 	private static RequestPostProcessor user() {
 		return jwt().authorities(new SimpleGrantedAuthority(USER_ROLE));

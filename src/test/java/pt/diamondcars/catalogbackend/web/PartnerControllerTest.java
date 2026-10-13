@@ -27,9 +27,11 @@ import pt.diamondcars.catalogbackend.domain.car.Car;
 import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.domain.partner.Partner;
 import pt.diamondcars.catalogbackend.domain.partner.PartnerRepository;
+import pt.diamondcars.catalogbackend.domain.transaction.TransactionRepository;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 import pt.diamondcars.catalogbackend.web.dto.CarRequest;
 import pt.diamondcars.catalogbackend.web.dto.PartnerRequest;
+import pt.diamondcars.catalogbackend.web.dto.SellCarRequest;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -39,34 +41,33 @@ import tools.jackson.databind.ObjectMapper;
  * {@code dcbo-backend}'s {@code PartnerControllerTest} with role tokens added (TASK-003 AC B.1).
  *
  * <p><b>Partition note</b>: 6 of the 18 tests in {@code dcbo-backend}'s version exercise {@code
- * POST /sell}, {@code POST /revert-sale} or a partner-moving {@code PUT /api/cars/{id}} —
- * endpoints TASK-010 creates, not this task. They are not ported here; TASK-010 ports them,
- * against the counter hooks this task already proved correct in isolation ({@code
- * PartnerServiceCountersTest}). This task only confirms, with {@code
- * creatingAConsignmentCarDoesNotChangeThePartnersCarsCount}, that creating a consignment car
- * (which TASK-003 already built) leaves the counters at zero — TASK-003 AC G.1 already measures
- * this for {@code create}/{@code reserve}/{@code release-reservation}/{@code highlight}, this
- * test only re-confirms it from the partner's side.
+ * POST /sell}, {@code POST /revert-sale}, {@code DELETE} or a partner-moving {@code PUT} of cars,
+ * endpoints TASK-010 creates. They are at the end of this class, in their own section (TASK-010 AC
+ * D.2, P1 to P6). {@code creatingAConsignmentCarDoesNotChangeThePartnersCarsCount} confirms that
+ * creating a consignment car leaves the counters at zero.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
 class PartnerControllerTest extends AbstractPostgresIntegrationTest {
 
 	private static final String USER_ROLE = "ROLE_USER";
+	private static final String ADMIN_ROLE = "ROLE_ADMIN";
 	private static final String PATH = "/api/backoffice/partners";
 
 	@Autowired private MockMvc mockMvc;
 	@Autowired private ObjectMapper objectMapper;
 	@Autowired private PartnerRepository partnerRepository;
 	@Autowired private CarRepository carRepository;
+	@Autowired private TransactionRepository transactionRepository;
 
 	/**
 	 * Clears every row this class writes before each test, for the same reason {@code
 	 * BackOfficeCarControllerTest#cleanDatabase()} does (shared, JVM-wide singleton container, no
-	 * per-test rollback).
+	 * per-test rollback). Transactions first: the sales of the TASK-010 tests create them.
 	 */
 	@BeforeEach
 	void cleanDatabase() {
+		transactionRepository.deleteAllInBatch();
 		carRepository.deleteAll();
 		partnerRepository.deleteAll();
 	}
@@ -423,5 +424,211 @@ class PartnerControllerTest extends AbstractPostgresIntegrationTest {
 								.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
 				.andExpect(status().isBadRequest())
 				.andExpect(content().string(containsString("nosuchfield")));
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Ported from dcbo-backend in TASK-010 (AC D.2, P1 to P6): the 6 tests this class left to the
+	// task that creates sell, revert-sale, PUT and DELETE of cars. Same method names.
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * P1: deleting an unsold consignment car does not touch the partner's {@code cars_count}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingAnUnsoldConsignmentCarDoesNotChangeThePartnersCarsCount() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Parceiro B").carsCount(3).build());
+		Car car = carRepository.saveAndFlush(aConsignmentCarFor(partner).build());
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId())
+						.with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isNoContent());
+
+		mockMvc
+				.perform(get(PATH + "/{id}", partner.getId()).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.carsCount").value(3));
+	}
+
+	/**
+	 * P2: selling a consignment car adds its commission to the partner's {@code total_commission}
+	 * and one to {@code cars_count}, in the same transaction; reverting the sale takes both back.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingAConsignmentCarIncrementsThePartnersTotalCommissionAndCarsCount() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Parceiro C").build());
+		Car car = carRepository.saveAndFlush(aConsignmentCarFor(partner).build());
+
+		sell(car.getId());
+
+		Partner afterSale = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterSale.getTotalCommission()).isEqualByComparingTo(new BigDecimal("500.00"));
+		assertThat(afterSale.getCarsCount()).isEqualTo(1);
+
+		revertSale(car.getId());
+
+		Partner afterRevert = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterRevert.getTotalCommission()).isEqualByComparingTo(BigDecimal.ZERO);
+		assertThat(afterRevert.getCarsCount()).isZero();
+	}
+
+	/**
+	 * P3: {@code revert-sale} on a consignment car that was never sold is a no-op: the partner's
+	 * counters are not discounted.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void revertingASaleOnANeverSoldConsignmentCarLeavesThePartnersCountersUntouched() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder()
+				.name("Parceiro H")
+				.carsCount(3)
+				.totalCommission(new BigDecimal("1500.00"))
+				.build());
+		Car car = carRepository.saveAndFlush(aConsignmentCarFor(partner).build());
+
+		revertSale(car.getId());
+
+		Partner reloaded = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(reloaded.getTotalCommission()).isEqualByComparingTo(new BigDecimal("1500.00"));
+		assertThat(reloaded.getCarsCount()).isEqualTo(3);
+	}
+
+	/**
+	 * P4: a second {@code revert-sale} of an already reverted sale does not discount the partner
+	 * again (measured in {@code dcbo-backend} as 1500 -> 1100 -> 100 before the fix).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void revertingAnAlreadyRevertedSaleDoesNotDiscountThePartnersCountersAgain() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder()
+				.name("Parceiro I")
+				.carsCount(2)
+				.totalCommission(new BigDecimal("1000.00"))
+				.build());
+		Car car = carRepository.saveAndFlush(aConsignmentCarFor(partner).build());
+
+		sell(car.getId());
+
+		Partner afterSale = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterSale.getTotalCommission()).isEqualByComparingTo(new BigDecimal("1500.00"));
+		assertThat(afterSale.getCarsCount()).isEqualTo(3);
+
+		revertSale(car.getId());
+
+		Partner afterFirstRevert = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterFirstRevert.getTotalCommission()).isEqualByComparingTo(new BigDecimal("1000.00"));
+		assertThat(afterFirstRevert.getCarsCount()).isEqualTo(2);
+
+		revertSale(car.getId());
+
+		Partner afterSecondRevert = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterSecondRevert.getTotalCommission()).isEqualByComparingTo(new BigDecimal("1000.00"));
+		assertThat(afterSecondRevert.getCarsCount()).isEqualTo(2);
+	}
+
+	/**
+	 * P5: editing a sold consignment car's partner moves the registered commission from the old
+	 * partner to the new one, so the later {@code revert-sale} undoes it from the right place.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void editingASoldConsignmentCarsPartnerMovesTheCommissionToTheNewPartner() throws Exception {
+		Partner partnerA = partnerRepository.saveAndFlush(Partner.builder().name("Parceiro J").build());
+		Partner partnerB = partnerRepository.saveAndFlush(Partner.builder().name("Parceiro K").build());
+		Car car = carRepository.saveAndFlush(aConsignmentCarFor(partnerA).build());
+
+		sell(car.getId());
+		assertThat(partnerRepository.findById(partnerA.getId()).orElseThrow().getTotalCommission())
+				.isEqualByComparingTo(new BigDecimal("500.00"));
+
+		mockMvc
+				.perform(put("/api/backoffice/cars/{id}", car.getId())
+						.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE)))
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(consignmentCarRequestFor(partnerB.getId()))))
+				.andExpect(status().isOk());
+
+		assertThat(partnerRepository.findById(partnerA.getId()).orElseThrow().getTotalCommission())
+				.isEqualByComparingTo(BigDecimal.ZERO);
+		assertThat(partnerRepository.findById(partnerA.getId()).orElseThrow().getCarsCount()).isZero();
+		assertThat(partnerRepository.findById(partnerB.getId()).orElseThrow().getTotalCommission())
+				.isEqualByComparingTo(new BigDecimal("500.00"));
+		assertThat(partnerRepository.findById(partnerB.getId()).orElseThrow().getCarsCount()).isEqualTo(1);
+
+		revertSale(car.getId());
+
+		assertThat(partnerRepository.findById(partnerB.getId()).orElseThrow().getTotalCommission())
+				.isEqualByComparingTo(BigDecimal.ZERO);
+		assertThat(partnerRepository.findById(partnerB.getId()).orElseThrow().getCarsCount()).isZero();
+		assertThat(partnerRepository.findById(partnerA.getId()).orElseThrow().getTotalCommission())
+				.isEqualByComparingTo(BigDecimal.ZERO);
+	}
+
+	/**
+	 * P6: editing only the commission of a sold consignment car reverses the previous value and
+	 * registers the new one. The non-zero starting balance is what makes it observable: reversing
+	 * with the new value would still pass from zero (the {@code max(0)} clamp hides it), but here
+	 * 1000 + 500 -> PUT to 800 -> 1800, and the reversal must land on exactly 1000.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void editingOnlyTheCommissionValueOfASoldConsignmentCarReconciliesAgainstThePreviousValue() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder()
+				.name("Parceiro L")
+				.carsCount(2)
+				.totalCommission(new BigDecimal("1000.00"))
+				.build());
+		Car car = carRepository.saveAndFlush(aConsignmentCarFor(partner).build());
+
+		sell(car.getId());
+
+		Partner afterSale = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterSale.getTotalCommission()).isEqualByComparingTo(new BigDecimal("1500.00"));
+		assertThat(afterSale.getCarsCount()).isEqualTo(3);
+
+		CarRequest changedCommissionOnly = new CarRequest(
+				"Audi", "A4", 2019, new BigDecimal("22000.00"), 80000, "Branco", "Gasolina", "Manual", "stand",
+				null, null, null, null, true, partner.getId(), new BigDecimal("800.00"), 0, false, null, null);
+
+		mockMvc
+				.perform(put("/api/backoffice/cars/{id}", car.getId())
+						.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE)))
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(changedCommissionOnly)))
+				.andExpect(status().isOk());
+
+		Partner afterEdit = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterEdit.getTotalCommission()).isEqualByComparingTo(new BigDecimal("1800.00"));
+		assertThat(afterEdit.getCarsCount()).isEqualTo(3);
+
+		revertSale(car.getId());
+
+		Partner afterRevert = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterRevert.getTotalCommission()).isEqualByComparingTo(new BigDecimal("1000.00"));
+		assertThat(afterRevert.getCarsCount()).isEqualTo(2);
+	}
+
+	private void sell(UUID carId) throws Exception {
+		mockMvc
+				.perform(post("/api/backoffice/cars/{id}/sell", carId)
+						.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE)))
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(new SellCarRequest(new BigDecimal("21000.00"), null))))
+				.andExpect(status().isOk());
+	}
+
+	private void revertSale(UUID carId) throws Exception {
+		mockMvc
+				.perform(post("/api/backoffice/cars/{id}/revert-sale", carId)
+						.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk());
 	}
 }

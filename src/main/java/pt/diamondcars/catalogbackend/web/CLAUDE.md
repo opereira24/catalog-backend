@@ -58,10 +58,11 @@ back-office. Cada ponto tem um teste que o prova.
 | Campo | `POST` | `PUT` (TASK-010) |
 |---|---|---|
 | `observacoes` | nulo ou só espaços: `null` | nulo/ausente: mantém; `""`/espaços: limpa; texto: substitui |
-| `destaque` | nulo: `false` | nulo/ausente: mantém (gere-se no `PATCH .../highlight`) |
-| `images`, `imageThumbnails` | nulo: lista vazia | nulo/ausente: mantém; `[]`: remove todas |
+| `destaque` | nulo: `false` | nulo/ausente: mantém; `false` retira; `true` sujeito ao limite de 8 |
+| `images`, `imageThumbnails` | nulo: lista vazia | `images` nulo/ausente: mantém as fotos; `[]`: remove todas |
 | `isConsignacao` | nulo: `false` | nulo: `false` |
 | `garantiaMeses` | nulo: 0 | nulo: 0 |
+| restantes opcionais | nulo: `null` | nulo: `null` (substituição total) |
 
 Porquê o `PUT` mantém: o `dcbo` edita com `updateDoc` do Firestore (só escreve as chaves
 enviadas). Um `PUT` que anulasse o que o formulário não conhece apagava `observacoes` (texto que o
@@ -90,6 +91,11 @@ no `PUT`.
   `Statistics#getPrepareStatementCount` do Hibernate, ligado só durante o pedido
   (`setStatisticsEnabled(true)` em runtime funciona; não é preciso propriedade nem contexto
   próprio).
+- Um teste que afirme a ordem por `createdAt` tem de fixar o `created_at` (`UPDATE` por JDBC):
+  o `@CreationTimestamp` lê o relógio da JVM, que no Windows avança em ticks de ~15,6 ms, e três
+  `saveAndFlush` seguidos ficam muitas vezes com o mesmo instante (medido: 20 saves deram 11
+  instantes distintos). Aí quem decide é o desempate por `id` aleatório e o teste falha 1 vez em
+  cada poucas (`listsCarsMostRecentlyCreatedFirstByDefault`, corrigido na TASK-010).
 
 ## Limite de 8 destaques: advisory lock
 
@@ -104,11 +110,16 @@ no `PUT`.
   destacados dá 8 e **9** (com 0 em destaque não há linha para trancar); advisory lock dá 8 e 8.
   `@Version` em `Car` (medido pelo arquiteto no protótipo) também 10 e 9: só protege a mesma linha. Constraint SQL não exprime "no máximo 8 linhas";
   `SERIALIZABLE` obrigava a repetir pedidos em `40001`.
-- Sem deadlock porque o lock vem sempre antes de qualquer escrita na mesma transação. Duas chaves
-  `int4` de propósito: não partilham o espaço `bigint` do lock do Flyway.
+- Sem deadlock porque o lock vem sempre antes de qualquer escrita na mesma transação, e sempre
+  **depois** do lock de linha do carro (TASK-010: `highlight` e `PUT` trancam o carro primeiro, ver
+  "Vendas, reversões e concorrência"). O `create` só pede o advisory (o carro novo não é visível a
+  mais ninguém). Duas chaves `int4` de propósito: não partilham o espaço `bigint` do lock do Flyway.
 - Caso-limite aceite: dois pedidos simultâneos a destacar **o mesmo** carro com 7 outros em
-  destaque; o segundo recebe 409 apesar de o carro ficar destacado.
-- Qualquer escrita nova que ligue `destaque` (o `PUT` da TASK-010) passa pelo mesmo método.
+  destaque; com o lock de linha da TASK-010 o segundo espera pelo primeiro, vê o carro já
+  destacado e responde 200 sem pedir o advisory.
+- Qualquer escrita que ligue `destaque` passa pelo mesmo método: o `PUT` da TASK-010 com
+  `destaque: true` num carro sem destaque, antes de qualquer escrita (um 409 aí não grava nada, nem a
+  reconciliação de um carro vendido).
 
 ## Testar corridas de forma determinística: `LOCK TABLE ... IN SHARE MODE`
 
@@ -143,6 +154,15 @@ A escrita de cada worker tem de acontecer **depois** da decisão (aqui `saveAndF
 método); se o código escrever antes de decidir, o portão prende-o antes da decisão e o teste
 deixa de provar a corrida.
 
+Variante com locks de linha (`service/CarSaleConcurrencyTest`, TASK-010): o portão é `LOCK TABLE
+cars, clients, partners IN SHARE MODE`. `SELECT ... FOR NO KEY UPDATE` pede `ROW SHARE` e passa;
+um worker que espera pela linha que outro trancou também conta como `wait_event_type = 'Lock'`. Por
+isso o número a esperar é sempre o de workers, quer esperem pelo portão quer uns pelos outros. As
+tabelas fora do portão (`transactions`, `leads`) escrevem sem esperar: o `INSERT`/`DELETE` de uma
+transação de venda corre antes do portão abrir, e só pede `FOR KEY SHARE` às linhas referenciadas.
+Para provar uma corrida contra um `DELETE` (K8) o portão é a própria ligação que apagou a linha sem
+commit.
+
 ## Clientes e parceiros (TASK-004)
 
 `/api/backoffice/clients` e `/api/backoffice/partners` seguem a mesma convenção dos carros, com
@@ -157,10 +177,19 @@ duas diferenças deliberadas:
   chegar ao cliente: `ClientService#delete`/`PartnerService#delete` verificam
   `existsByClientId`/`existsByPartnerId` antes de apagar, com a mensagem a nomear o recurso.
 
-`PartnerService` ganhou `incrementCarsCount`/`decrementCarsCount`/`registerCommission`/
-`reverseCommission` **sem nenhum chamador ainda** — mutam só o objeto em memória (sem
-repositório), provados por `PartnerServiceCountersTest` (unitário puro). A TASK-010 liga-os a
-`BackOfficeCarService#sell`/`revertSale`/`update` quando os criar.
+`PartnerService` tem `incrementCarsCount`/`decrementCarsCount`/`registerCommission`/
+`reverseCommission`, chamados por `BackOfficeCarService#sell`/`#revertSale`/`#update` (este só num
+carro vendido) desde a TASK-010. Mutam só o objeto em memória (sem repositório; o dirty checking
+grava no commit), provados por `PartnerServiceCountersTest` (unitário puro). O chamador passa-lhes
+um parceiro carregado com `PartnerRepository#findByIdForUpdate` (linha trancada).
+
+`PartnerService#update`, `ClientService#update` e `ClientService#delete` leem com
+`findByIdForUpdate` (TASK-010): o Hibernate grava a linha inteira com os valores que leu, por isso
+editar o nome durante uma venda repunha o contador antigo (K5/K6), e um `delete` sem lock podia
+passar o "não tem carros" no instante em que uma venda lhe atribuía um (K7). No `delete` o lock vem
+antes do `existsByClientId`. `PartnerService#delete` **não** tranca: a corrida dele é contra a
+verificação de FK do `create`/`PUT` de carros (`FOR KEY SHARE`), que um `FOR NO KEY UPDATE` não
+trava; fica para a TASK-015 (`FOR UPDATE` explícito).
 
 ## Transações e finanças (TASK-005)
 
@@ -206,10 +235,11 @@ carros. O que não se adivinha pelo código:
   transações de sistema a `ADMIN` e `USER` (paridade com `dcbo`).
 - **`InvalidReferenceException` dá 400, não 404**: `carroId` inexistente é um campo do corpo, não o
   recurso do URL (o `partnerId` de `CarRequest` dá 404 por precedente próprio).
-- **3 métodos para a TASK-010**, sem chamador ainda: `createSaleTransaction`,
-  `deleteSaleTransactions` (só `system_generated`), `deleteAllForCar` (manuais incluídas).
-  Propagação `REQUIRED`, nunca `REQUIRES_NEW`: correm dentro da transação do `sell`/`revertSale`/
-  `delete` do carro e uma falha depois deles desfaz o movimento financeiro
+- **3 métodos da venda**, chamados por `BackOfficeCarService` desde a TASK-010: `createSaleTransaction`
+  (`sell`), `deleteSaleTransactions` (`revertSale`, só `system_generated`), `deleteAllForCar`
+  (`delete` com `deleteTransactions=true`, manuais incluídas). Propagação `REQUIRED`, nunca
+  `REQUIRES_NEW`: correm dentro da transação do `sell`/`revertSale`/`delete` do carro e uma falha
+  depois deles desfaz o movimento financeiro
   (`TransactionServiceTest#createSaleTransactionRollsBackWithTheCallersTransaction`).
 - **`Clock` por construtor package-private, não bean.** O construtor público usa
   `Clock.systemUTC()`; a data da venda é sempre `LocalDate.ofInstant(clock.instant(), Europe/Lisbon)`.
@@ -222,3 +252,85 @@ carros. O que não se adivinha pelo código:
   (`"saldo":-50.00`), não o valor do JsonPath, que perde as casas.
 - Custo fixo: listar 100 transações com carro, cliente e parceiro são no máximo 3 statements
   (página, `count`, `ActiveUserInterceptor`); o DTO só lê `getId()` dos proxies.
+
+## Vendas, reversões e concorrência (TASK-010)
+
+`PUT`, `DELETE` (só `ADMIN`), `POST .../sell` e `POST .../revert-sale` em `/api/backoffice/cars/{id}`.
+Os testes estão em `BackOfficeCarControllerTest` (secções TASK-010), `TransactionControllerTest`
+(T1 a T6 e summary), `PartnerControllerTest` (P1 a P6) e `service/CarSaleConcurrencyTest` (K1 a K10).
+
+**Semântica** (paridade com `dcbo-backend`, que só mexe nos contadores na venda e na reversão):
+
+- **Venda**: `vendido`, `precoVenda`, `dataVenda` (agora), cliente; `purchases_count + 1` do cliente.
+  Carro em consignação com parceiro: comissão em `total_commission`, `cars_count + 1` e transação
+  `comissao_venda` ("Comissao: marca modelo", valor = comissão, `0.00` se não houver, com parceiro e
+  cliente). Caso contrário: `venda_veiculo` ("Venda: marca modelo", valor = `precoVenda`, sem
+  parceiro, mesmo que o carro tenha um). Carro já vendido: 409 `Carro ja vendido: <id>`
+  (`CarAlreadySoldException`), lançado logo a seguir ao lock do carro, antes de qualquer outro lock
+  ou escrita. Cliente inexistente: 404 sem escrever nada.
+- **Reversão**: desfaz exatamente o que a venda registou com os valores **atuais** do carro
+  (cliente com piso 0, comissão e `cars_count` do parceiro), apaga só a transação
+  `system_generated` do carro (uma manual nunca) e limpa os 4 campos da venda. Carro não vendido:
+  **no-op 200**, nada muda (o `dcbo-backend` chegou a descontar comissão por uma venda que não
+  existiu, também numa segunda reversão).
+- **`PUT` de carro vendido**: `reconcileConsignmentSaleAfterEdit` tira a comissão e um carro ao
+  parceiro em que a venda registou (se era consignação) e põe-nos no parceiro/comissão novos (se é),
+  para a reversão seguinte desfazer o certo. **ASSUNÇÃO (AC C.4)**: a transação `comissao_venda`
+  **não** acompanha a edição (paridade); o resumo financeiro mostra a comissão original até a
+  venda ser revertida, e a reversão apaga-a. `PUT` de carro não vendido não toca em contadores nem
+  em transações.
+- **`DELETE`**: `deleteTransactions=true` (omissão, a checkbox do `dcbo`) apaga todas as transações
+  do carro e, se estava vendido, decrementa o cliente (piso 0); `false` deixa-as com `carroId` nulo
+  (`transactions.car_id ON DELETE SET NULL`) e não mexe em contadores. O parceiro nunca muda.
+  `?deleteTransactions=abc` dá 400 `Parametro 'deleteTransactions' com valor invalido`. Fotos saem
+  com o carro (`orphanRemoval` + `ON DELETE CASCADE`); leads ficam com `car_id` nulo.
+- **`precoVenda`**: `@DecimalMin("100")`, teto `CarRequest.PRICE_MAX_VALUE` (acima: 400, nunca o 409
+  de um overflow de `numeric(12,2)`) e `@Digits(integer = 8, fraction = 2)` (novo face ao
+  `dcbo-backend`: `20000.005` era gravado `20000.01` com a resposta a ecoar `20000.005`).
+
+**Concorrência: lock de linha, sem coluna nova, isolamento `READ COMMITTED`.** O Hibernate grava a
+linha inteira com os valores que leu (sem `@DynamicUpdate`, sem `@Version`), por isso qualquer
+ler-alterar-gravar sem lock de um carro, parceiro ou cliente desfaz o que outra transação gravou
+entretanto, e não só nos contadores. Medido em PostgreSQL real (arquiteto, e cada linha morta por
+uma mutação no PR):
+
+| # | Corrida | Sem lock | Com lock |
+|---|---|---|---|
+| K1 | 2 `sell` do mesmo carro ao mesmo cliente | 2 vendas, `purchases_count` 2, 2 transações | 1 + 1 409, 1, 1 |
+| K2 | 4 `sell` de 4 carros em consignação do mesmo parceiro (100.25) | `cars_count` 1, 100.25 | 4, 401.00 |
+| K3 | `revert-sale` do carro A e `sell` do B, mesmo cliente | `purchases_count` 0 | 1 |
+| K4 | `sell` e `reserve` do mesmo carro | `vendido` false (a venda some do carro) | `vendido` e `reservado` |
+| K5 | `sell` (consignação) e `PUT` do parceiro (nome) | `cars_count` 0 | 1 e o nome novo |
+| K6 | `sell` e `PUT` do comprador | `purchases_count` 0 | 1 e o nome novo |
+| K7 | `sell` ao cliente C e `DELETE` de C | carro vendido sem cliente | um ganha, dados coerentes |
+| K8 | lead com o `carroId` de um carro cujo `DELETE` não fez commit | 409, lead perdido | lead com `car_id` nulo |
+| K9 | 2 `revert-sale` do mesmo carro | `purchases_count` 0 | 1 |
+| K10 | `PUT` de vendido do parceiro A para B e `sell` de outro carro de B | B com 1 | A 0, B 2 |
+
+Regras (cada uma com o cenário que a prova):
+
+- **Carro**: `CarRepository#findByIdForUpdate` é a primeira leitura do carro em toda a operação que
+  escreve num carro existente (`update`, `delete`, `sell`, `revertSale`, `reserve`,
+  `releaseReservation`, `highlight`). Só o `get` usa `findById`. O `create` só pede o advisory.
+- **Parceiro e cliente**: `findByIdForUpdate` antes de mexer em `cars_count`/`total_commission`/
+  `purchases_count` (`sell`, `revertSale`, `update` de vendido, `delete` com transações de vendido) e
+  em `PartnerService#update`, `ClientService#update`/`#delete`.
+- **Ordem, sempre a mesma** (sem ciclos): carro, advisory do destaque (só quando liga um destaque),
+  parceiros por `id` crescente (no `PUT` de um vendido: o da venda e o pedido, o mesmo só uma vez),
+  cliente. Tudo antes da primeira escrita do método.
+- **Armadilha da primeira carga** (medida): o lock tem de ser a primeira carga dessa entidade na
+  transação. Um `Hibernate.initialize(car.getPartner())`, um getter de estado do parceiro ou um
+  `findById` antes do `findByIdForUpdate` faz o `SELECT ... for no key update` correr, mas o Hibernate
+  devolve o estado que já tinha em memória (mutação M9: K2 dá `cars_count` 1). Ler só
+  `car.getPartner().getId()` (proxy `LAZY` por inicializar) é seguro. No `PUT` de um vendido o
+  parceiro pedido é carregado diretamente pelo lock, nunca primeiro pelo `requirePartner`.
+- **SQL real**: no Hibernate do Boot 4.1.1 o `PESSIMISTIC_WRITE` em PostgreSQL é `for no key update`.
+  Não entra em conflito com o `FOR KEY SHARE` das verificações de FK: gravar um lead ou uma transação
+  manual com esse `car_id` não espera por uma venda nem por um `PUT`; só o `DELETE` do carro os
+  bloqueia. O `POST /api/leads` pede `CarRepository#lockKeyShare` (`FOR KEY SHARE`, o lock mais fraco
+  que trava um `DELETE`) e depois `getReferenceById`: se o `DELETE` já tem a linha, o lead espera e
+  grava sem carro; se o lead chega primeiro, o `DELETE` espera e o `ON DELETE SET NULL` limpa-o.
+- **Rejeitado**: `@Version` em `Car` (coluna nova, e não protege as linhas de parceiro/cliente
+  partilhadas por carros diferentes: K2, K3, K5, K6), `SERIALIZABLE`/`REPEATABLE READ` (obrigam a
+  repetir pedidos em `40001`), advisory global de vendas (serializa vendas sem nada em comum). Sem
+  `lock_timeout`: nenhuma destas transações faz I/O externo, cada lock dura poucos statements.

@@ -23,6 +23,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import pt.diamondcars.catalogbackend.web.dto.ApiError;
+import pt.diamondcars.catalogbackend.web.exception.CarAlreadySoldException;
 import pt.diamondcars.catalogbackend.web.exception.CarNotFoundException;
 import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededException;
 import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
@@ -207,6 +208,20 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(ResourceInUseException.class)
 	public ResponseEntity<ApiError> handleResourceInUse(
 			ResourceInUseException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link CarAlreadySoldException} (selling a car that is already sold, TASK-010 AC B.6) to
+	 * 409 with the exception's message ({@code Carro ja vendido: <id>}).
+	 *
+	 * @param exception the exception thrown by {@code BackOfficeCarService#sell}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(CarAlreadySoldException.class)
+	public ResponseEntity<ApiError> handleCarAlreadySold(
+			CarAlreadySoldException exception, HttpServletRequest request) {
 		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
 	}
 

@@ -27,7 +27,7 @@ import pt.diamondcars.catalogbackend.web.dto.FinanceSummaryResponse;
 import pt.diamondcars.catalogbackend.web.dto.TransactionRequest;
 
 /**
- * Integration tests of the three {@link TransactionService} hooks TASK-010 will call ({@link
+ * Integration tests of the three {@link TransactionService} hooks the car sale of TASK-010 calls ({@link
  * TransactionService#createSaleTransaction}, {@link TransactionService#deleteSaleTransactions},
  * {@link TransactionService#deleteAllForCar}) and of the date clamp of {@link
  * TransactionService#summary}, calling the service directly against the shared PostgreSQL container

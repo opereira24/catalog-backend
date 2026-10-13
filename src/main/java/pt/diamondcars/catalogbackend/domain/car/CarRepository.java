@@ -1,12 +1,16 @@
 package pt.diamondcars.catalogbackend.domain.car;
 
+import jakarta.persistence.LockModeType;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 /**
  * Spring Data repository for {@link Car}: the derived queries the public catalog uses, plus the
@@ -14,7 +18,8 @@ import org.springframework.data.jpa.repository.Query;
  * with a production caller), plus {@link JpaSpecificationExecutor} so {@code CarQueryService} can
  * compose the optional filters {@code GET /api/cars} accepts without one derived-query method per
  * combination, plus the advisory lock the back-office highlight limit takes ({@link
- * #lockHighlightSlots()}, TASK-003).
+ * #lockHighlightSlots()}, TASK-003), plus the row locks of TASK-010 ({@link #findByIdForUpdate},
+ * {@link #lockKeyShare}).
  */
 public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificationExecutor<Car> {
 
@@ -121,4 +126,42 @@ public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificatio
 			value = "SELECT 1 FROM pg_advisory_xact_lock(hashtext('catalog-backend'), hashtext('cars.destaque'))",
 			nativeQuery = true)
 	int lockHighlightSlots();
+
+	/**
+	 * Loads a car and locks its row until the end of the transaction (TASK-010, AC C.1.a): every
+	 * back-office operation that writes to an existing car ({@code update}, {@code delete}, {@code
+	 * sell}, {@code revertSale}, {@code reserve}, {@code releaseReservation}, {@code highlight})
+	 * reads it with this, never with {@code findById}. Hibernate writes the whole row with the values
+	 * it read (no {@code @DynamicUpdate}, no {@code @Version}), so two unlocked read-modify-writes of
+	 * the same car lose one of them: a concurrent {@code reserve} used to erase a sale.
+	 *
+	 * <p>On PostgreSQL this is {@code SELECT ... FOR NO KEY UPDATE}, which does not conflict with the
+	 * {@code FOR KEY SHARE} of a foreign key check: saving a lead or a manual transaction for this car
+	 * never waits for a sale or an edit, only for a {@code DELETE} of the car.
+	 *
+	 * <p>Must be the first load of this car in the transaction: if the car is already in the
+	 * persistence context, Hibernate locks the row but hands back the stale state it had in memory.
+	 *
+	 * @param id the car's id
+	 * @return the locked car, or empty if no car has this id
+	 */
+	@Lock(LockModeType.PESSIMISTIC_WRITE)
+	@Query("select c from Car c where c.id = :id")
+	Optional<Car> findByIdForUpdate(@Param("id") UUID id);
+
+	/**
+	 * Takes the weakest row lock that blocks a {@code DELETE} of the car ({@code FOR KEY SHARE}), for
+	 * {@code POST /api/leads} (TASK-010, AC C.8). Without it, a car deleted between the lead's lookup
+	 * and its {@code INSERT} made the insert fail on {@code leads_car_id_fkey} and the lead was lost
+	 * with a 409. With it, a lead that arrives during an uncommitted {@code DELETE} waits for the
+	 * commit and then finds no car (saved with {@code car_id} null); a {@code DELETE} that arrives
+	 * after the lead waits for the lead's commit, and {@code ON DELETE SET NULL} then clears it. It
+	 * does not wait for sales, edits or reservations of the car ({@code FOR NO KEY UPDATE}).
+	 *
+	 * @param id the car's id
+	 * @return the id if the car exists (now protected from deletion until the end of the
+	 *     transaction), or empty
+	 */
+	@Query(value = "SELECT id FROM cars WHERE id = :id FOR KEY SHARE", nativeQuery = true)
+	Optional<UUID> lockKeyShare(@Param("id") UUID id);
 }

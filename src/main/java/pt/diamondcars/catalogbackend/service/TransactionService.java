@@ -28,10 +28,10 @@ import pt.diamondcars.catalogbackend.web.exception.UnknownSortPropertyException;
 /**
  * Business logic of {@code /api/backoffice/transactions} and {@code /api/backoffice/finances}
  * (TASK-005, AC C.2), ported from {@code dcbo-backend}'s {@code TransactionService}, plus the three
- * hooks TASK-010's car sale, sale reversal and car deletion call: {@link #createSaleTransaction},
- * {@link #deleteSaleTransactions} and {@link #deleteAllForCar}. Those three have no caller yet
- * (same precedent as {@code PartnerService#registerCommission}, TASK-004); {@code
- * TransactionServiceTest} and {@code TransactionServiceSaleDateTest} prove them.
+ * hooks {@code BackOfficeCarService}'s sale, sale reversal and car deletion call (TASK-010): {@link
+ * #createSaleTransaction}, {@link #deleteSaleTransactions} and {@link #deleteAllForCar}. {@code
+ * TransactionServiceTest} and {@code TransactionServiceSaleDateTest} prove them in isolation; the
+ * car tests prove them through the car endpoints.
  *
  * <p>Every public method is {@code @Transactional} and maps to a DTO before returning: with {@code
  * spring.jpa.open-in-view: false}, mapping must happen while the persistence context is open. The

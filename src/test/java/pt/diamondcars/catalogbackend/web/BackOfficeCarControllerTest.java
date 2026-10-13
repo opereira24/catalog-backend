@@ -3,12 +3,14 @@ package pt.diamondcars.catalogbackend.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -18,6 +20,8 @@ import jakarta.persistence.EntityManagerFactory;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -47,10 +51,13 @@ import pt.diamondcars.catalogbackend.domain.client.Client;
 import pt.diamondcars.catalogbackend.domain.client.ClientRepository;
 import pt.diamondcars.catalogbackend.domain.partner.Partner;
 import pt.diamondcars.catalogbackend.domain.partner.PartnerRepository;
+import pt.diamondcars.catalogbackend.domain.transaction.Transaction;
 import pt.diamondcars.catalogbackend.domain.transaction.TransactionRepository;
+import pt.diamondcars.catalogbackend.domain.transaction.TransactionType;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 import pt.diamondcars.catalogbackend.web.dto.CarRequest;
 import pt.diamondcars.catalogbackend.web.dto.HighlightRequest;
+import pt.diamondcars.catalogbackend.web.dto.SellCarRequest;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
@@ -65,7 +72,8 @@ import tools.jackson.databind.node.ObjectNode;
  * <p>The first 23 tests are ported from {@code dcbo-backend}'s {@code CarControllerTest} with the
  * same method names (the TASK-003 AC I.1 table and its script check them); only the package, the
  * path prefix and the {@code observacoes} argument of {@link CarRequest} changed. The tests after
- * them are new (AC I.4).
+ * them are new (AC I.4). Then TASK-010: the 7 tests of that class about update, delete, sale and
+ * reversal (AC D.1, same method names), and the new ones of its AC D.3/D.5.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
@@ -102,10 +110,11 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 	/**
 	 * Clears every row these tests write or count, so no test sees another's cars (the container is
 	 * shared by the whole JVM, with no per-test rollback). Transactions first: they may reference
-	 * partners and clients.
+	 * partners and clients. Leads too: a TASK-010 test inserts one to prove it survives the car.
 	 */
 	@BeforeEach
 	void cleanDatabase() {
+		jdbcTemplate.update("DELETE FROM leads");
 		transactionRepository.deleteAllInBatch();
 		carRepository.deleteAllInBatch();
 		clientRepository.deleteAllInBatch();
@@ -355,6 +364,11 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 	/**
 	 * C10: the listing is most recently created first by default.
 	 *
+	 * <p>The {@code created_at} values are set apart explicitly (TASK-010): {@code @CreationTimestamp}
+	 * reads the JVM clock, which on Windows advances in ~15.6 ms ticks, so three saves in a row often
+	 * got the same instant and the {@code id} tie-breaker (random UUIDs) decided the order. Measured: 1
+	 * failure in 4 runs on the developer's machine before this change.
+	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
@@ -362,6 +376,14 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 		Car first = carRepository.saveAndFlush(aPersistedCar().modelo("First").build());
 		Car second = carRepository.saveAndFlush(aPersistedCar().modelo("Second").build());
 		Car third = carRepository.saveAndFlush(aPersistedCar().modelo("Third").build());
+		Instant base = Instant.parse("2026-10-01T12:00:00Z");
+		List<Car> inCreationOrder = List.of(first, second, third);
+		for (int i = 0; i < inCreationOrder.size(); i++) {
+			jdbcTemplate.update(
+					"UPDATE cars SET created_at = ? WHERE id = ?",
+					Timestamp.from(base.plusSeconds(i)),
+					inCreationOrder.get(i).getId());
+		}
 
 		mockMvc
 				.perform(get("/api/backoffice/cars").with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
@@ -1364,8 +1386,859 @@ class BackOfficeCarControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	// ---------------------------------------------------------------------------------------------
+	// Ported from dcbo-backend's CarControllerTest in TASK-010 (AC D.1, rows marked 010)
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * C04: selling a car to a known client increments that client's {@code purchases_count} in the
+	 * same request, and reverting the sale decrements it back.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingACarIncrementsAndRevertingDecrementsTheClientsPurchaseCount() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Cliente Teste").phone("912345678").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId())))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.vendido").value(true))
+				.andExpect(jsonPath("$.dataVenda").value(notNullValue()))
+				.andExpect(jsonPath("$.clienteId").value(client.getId().toString()));
+
+		assertThat(purchasesCount(client)).isEqualTo(1);
+
+		mockMvc
+				.perform(post("/api/backoffice/cars/{id}/revert-sale", car.getId())
+						.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.vendido").value(false))
+				.andExpect(jsonPath("$.clienteId").value(nullValue()));
+
+		assertThat(purchasesCount(client)).isZero();
+	}
+
+	/**
+	 * C13: a {@code USER} cannot delete a car (403), and the car stays.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingACarWithoutTheAdminRoleIsForbidden() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId())
+						.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.status").value(403))
+				.andExpect(jsonPath("$.message").value("Autenticado, mas sem a role exigida para esta operacao"));
+
+		assertThat(carRepository.existsById(car.getId())).isTrue();
+	}
+
+	/**
+	 * C14: the same request succeeds (204) for an {@code ADMIN}, so the 403 above is the role.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingACarWithTheAdminRoleSucceeds() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId())
+						.with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isNoContent());
+
+		assertThat(carRepository.existsById(car.getId())).isFalse();
+	}
+
+	/**
+	 * C15: a {@code PUT} that sends the photos replaces them, in order, dropping the old ones.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void updatingACarReplacesItsImages() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+		car.addImage(CarImage.builder().url("https://img/old.jpg").position(0).build());
+		carRepository.saveAndFlush(car);
+
+		mockMvc
+				.perform(putRequest(car.getId(), validCarRequest()).with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.images.length()").value(2))
+				.andExpect(jsonPath("$.images[0]").value("https://img/1.jpg"))
+				.andExpect(jsonPath("$.images[1]").value("https://img/2.jpg"));
+	}
+
+	/**
+	 * C16: selling an already sold car is a 409 that leaves the original sale untouched, in the worst
+	 * case measured in {@code dcbo-backend}: a second sale without {@code clienteId}, which used to
+	 * detach the car from its buyer and leave that buyer's count inflated for good.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingAnAlreadySoldCarIsRejectedAndLeavesTheOriginalSaleUntouched() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Cliente A").phone("911111111").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId())))
+				.andExpect(status().isOk());
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("19000.00"), null)))
+				.andExpect(status().isConflict())
+				.andExpect(jsonPath("$.message").value("Carro ja vendido: " + car.getId()));
+
+		mockMvc
+				.perform(get("/api/backoffice/cars/{id}", car.getId())
+						.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(jsonPath("$.clienteId").value(client.getId().toString()))
+				.andExpect(content().string(containsString("\"precoVenda\":21000.00")));
+		assertThat(purchasesCount(client)).isEqualTo(1);
+		assertThat(transactionRepository.findByCarId(car.getId())).hasSize(1);
+	}
+
+	/**
+	 * C17: selling the same car twice to the same client does not count the purchase twice.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingTheSameCarTwiceToTheSameClientDoesNotDoubleCountThePurchase() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Cliente B").phone("922222222").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+		SellCarRequest sale = new SellCarRequest(new BigDecimal("21000.00"), client.getId());
+
+		mockMvc.perform(sellRequest(car.getId(), sale)).andExpect(status().isOk());
+		mockMvc.perform(sellRequest(car.getId(), sale)).andExpect(status().isConflict());
+
+		assertThat(purchasesCount(client)).isEqualTo(1);
+	}
+
+	/**
+	 * C30: a sale price above the ceiling is a 400 that names the field, never the 409 a {@code
+	 * numeric(12,2)} overflow would give.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingACarAbovePriceCeilingIsRejectedWith400InsteadOf409() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("99999999999"), null)))
+				.andExpect(status().isBadRequest())
+				.andExpect(content().string(containsString("precoVenda")));
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// New in TASK-010 (AC D.3, D.5)
+	// ---------------------------------------------------------------------------------------------
+
+	/**
+	 * AC D.3: the sale answers 200 with the sold car (the 28 keys, {@code vendido}, {@code
+	 * precoVenda}, {@code dataVenda}, {@code clienteId}); a car without consignment gets a {@code
+	 * venda_veiculo} transaction for the sale price, with the buyer and no partner.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aSaleAnswersTheSoldCarAndRecordsAVendaVeiculoTransactionForTheSalePrice() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		JsonNode sold = objectMapper.readTree(mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21500.00"), client.getId())))
+				.andExpect(status().isOk())
+				.andReturn()
+				.getResponse()
+				.getContentAsString());
+
+		assertThat(fieldNames(sold)).containsExactlyInAnyOrderElementsOf(BACK_OFFICE_CAR_KEYS);
+		assertThat(sold.get("vendido").asBoolean()).isTrue();
+		assertThat(sold.get("precoVenda").decimalValue()).isEqualByComparingTo("21500.00");
+		assertThat(sold.get("dataVenda").isNull()).isFalse();
+		assertThat(sold.get("clienteId").asString()).isEqualTo(client.getId().toString());
+		List<Transaction> transactions = transactionRepository.findByCarId(car.getId());
+		assertThat(transactions).hasSize(1);
+		Transaction sale = transactions.get(0);
+		assertThat(sale.getTipo()).isEqualTo(TransactionType.VENDA);
+		assertThat(sale.getCategoria()).isEqualTo("venda_veiculo");
+		assertThat(sale.getDescricao()).isEqualTo("Venda: Audi A4");
+		assertThat(sale.getValor()).isEqualByComparingTo("21500.00");
+		assertThat(sale.getClient().getId()).isEqualTo(client.getId());
+		assertThat(sale.getPartner()).isNull();
+		assertThat(sale.isSystemGenerated()).isTrue();
+	}
+
+	/**
+	 * AC D.3: a consignment sale registers the commission on the partner ({@code total_commission},
+	 * {@code cars_count}), counts the purchase and records a {@code comissao_venda} transaction with
+	 * the partner and the buyer; the reversal undoes exactly that and clears the sale fields.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aConsignmentSaleAndItsReversalMoveEveryCounterExactly() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").purchasesCount(2).build());
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder()
+				.name("Auto Silva").carsCount(4).totalCommission(new BigDecimal("1000.50")).build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partner).commissionValue(new BigDecimal("750.25")).build());
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId())))
+				.andExpect(status().isOk());
+
+		assertThat(purchasesCount(client)).isEqualTo(3);
+		Partner afterSale = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterSale.getCarsCount()).isEqualTo(5);
+		assertThat(afterSale.getTotalCommission()).isEqualByComparingTo("1750.75");
+		Transaction commission = transactionRepository.findByCarId(car.getId()).get(0);
+		assertThat(commission.getCategoria()).isEqualTo("comissao_venda");
+		assertThat(commission.getDescricao()).isEqualTo("Comissao: Audi A4");
+		assertThat(commission.getValor()).isEqualByComparingTo("750.25");
+		assertThat(commission.getPartner().getId()).isEqualTo(partner.getId());
+		assertThat(commission.getClient().getId()).isEqualTo(client.getId());
+
+		JsonNode reverted = getJson(post("/api/backoffice/cars/{id}/revert-sale", car.getId()));
+
+		assertThat(reverted.get("vendido").asBoolean()).isFalse();
+		assertThat(reverted.get("precoVenda").isNull()).isTrue();
+		assertThat(reverted.get("dataVenda").isNull()).isTrue();
+		assertThat(reverted.get("clienteId").isNull()).isTrue();
+		assertThat(purchasesCount(client)).isEqualTo(2);
+		Partner afterRevert = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterRevert.getCarsCount()).isEqualTo(4);
+		assertThat(afterRevert.getTotalCommission()).isEqualByComparingTo("1000.50");
+		assertThat(transactionRepository.count()).isZero();
+	}
+
+	/**
+	 * AC D.3: a consignment car without a commission value still sells; the commission transaction
+	 * is recorded as {@code 0.00} and the partner's commission does not move (only {@code
+	 * cars_count}).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aConsignmentSaleWithoutCommissionRecordsAZeroCommission() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Auto Silva").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().consignacao(true).partner(partner).build());
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), null)))
+				.andExpect(status().isOk());
+
+		Partner afterSale = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(afterSale.getCarsCount()).isEqualTo(1);
+		assertThat(afterSale.getTotalCommission()).isEqualByComparingTo("0");
+		assertThat(transactionRepository.findByCarId(car.getId()).get(0).getValor()).isEqualByComparingTo("0.00");
+	}
+
+	/**
+	 * AC A.1/D.3 and M11: {@code revert-sale} on a car that is not sold is a 200 no-op: the counters
+	 * of the client and partner the car points to, and a manual transaction of the car, stay as they
+	 * were.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void revertingACarThatIsNotSoldChangesNothing() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").purchasesCount(2).build());
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder()
+				.name("Auto Silva").carsCount(3).totalCommission(new BigDecimal("1500.00")).build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).client(client).build());
+		transactionRepository.saveAndFlush(Transaction.builder()
+				.tipo(TransactionType.DESPESA).valor(new BigDecimal("80.00")).data(LocalDate.of(2026, 1, 1)).car(car).build());
+
+		JsonNode response = getJson(post("/api/backoffice/cars/{id}/revert-sale", car.getId()));
+
+		assertThat(response.get("vendido").asBoolean()).isFalse();
+		assertThat(response.get("clienteId").asString()).isEqualTo(client.getId().toString());
+		assertThat(purchasesCount(client)).isEqualTo(2);
+		Partner reloaded = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(reloaded.getCarsCount()).isEqualTo(3);
+		assertThat(reloaded.getTotalCommission()).isEqualByComparingTo("1500.00");
+		assertThat(transactionRepository.findByCarId(car.getId())).hasSize(1);
+	}
+
+	/**
+	 * AC B.2 and M11: the client's {@code purchases_count} never goes below 0, on a reversal and on
+	 * the deletion of a sold car (a buyer at 0 is possible with data migrated from Firestore).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void theBuyersPurchaseCountNeverGoesBelowZero() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Car reverted = carRepository.saveAndFlush(aSoldCar(client).build());
+		Car deleted = carRepository.saveAndFlush(aSoldCar(client).build());
+
+		getJson(post("/api/backoffice/cars/{id}/revert-sale", reverted.getId()));
+		assertThat(purchasesCount(client)).isZero();
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", deleted.getId()).with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isNoContent());
+		assertThat(purchasesCount(client)).isZero();
+	}
+
+	/**
+	 * AC B.3/C.3: a {@code PUT} that moves a sold car from partner A (commission 500) to partner B
+	 * with another commission (800) takes exactly 500 and one car off A and puts 800 and one car on
+	 * B; the reversal then takes 800 and one car off B, so both end where they started. The sale
+	 * transaction keeps its original partner and value (AC C.4).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void editingASoldCarsPartnerAndCommissionReconcilesBothAndTheReversalLeavesBothWhereTheyStarted() throws Exception {
+		Partner partnerA = partnerRepository.saveAndFlush(Partner.builder()
+				.name("A").carsCount(1).totalCommission(new BigDecimal("100.00")).build());
+		Partner partnerB = partnerRepository.saveAndFlush(Partner.builder()
+				.name("B").carsCount(2).totalCommission(new BigDecimal("200.00")).build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partnerA).commissionValue(new BigDecimal("500.00")).build());
+		mockMvc.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), null))).andExpect(status().isOk());
+
+		ObjectNode body = validBody();
+		body.put("isConsignacao", true);
+		body.put("partnerId", partnerB.getId().toString());
+		body.put("commissionValue", 800);
+		mockMvc
+				.perform(putRequest(car.getId(), body).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.partnerId").value(partnerB.getId().toString()))
+				.andExpect(jsonPath("$.vendido").value(true));
+
+		assertPartner(partnerA, 1, "100.00");
+		assertPartner(partnerB, 3, "1000.00");
+		Transaction saleTransaction = transactionRepository.findByCarId(car.getId()).get(0);
+		assertThat(saleTransaction.getPartner().getId()).isEqualTo(partnerA.getId());
+		assertThat(saleTransaction.getValor()).isEqualByComparingTo("500.00");
+
+		getJson(post("/api/backoffice/cars/{id}/revert-sale", car.getId()));
+
+		assertPartner(partnerA, 1, "100.00");
+		assertPartner(partnerB, 2, "200.00");
+		assertThat(transactionRepository.count()).isZero();
+	}
+
+	/**
+	 * AC B.3: a {@code PUT} that takes a sold car out of consignment removes what the sale registered
+	 * on the partner, and the reversal then changes no partner.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void editingASoldCarOutOfConsignmentReversesTheRegisteredCommission() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("A").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).build());
+		mockMvc.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), null))).andExpect(status().isOk());
+		assertPartner(partner, 1, "500.00");
+
+		mockMvc
+				.perform(putRequest(car.getId(), validCarRequest()).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk());
+		assertPartner(partner, 0, "0.00");
+
+		getJson(post("/api/backoffice/cars/{id}/revert-sale", car.getId()));
+		assertPartner(partner, 0, "0.00");
+	}
+
+	/**
+	 * AC B.3: a {@code PUT} of an unsold consignment car (other partner, other commission) changes no
+	 * counter and creates no transaction.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void editingAnUnsoldCarTouchesNoCounterNorTransaction() throws Exception {
+		Partner partnerA = partnerRepository.saveAndFlush(Partner.builder().name("A").carsCount(1).build());
+		Partner partnerB = partnerRepository.saveAndFlush(Partner.builder().name("B").carsCount(2).build());
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").purchasesCount(1).build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partnerA).commissionValue(new BigDecimal("500.00")).client(client).build());
+
+		ObjectNode body = validBody();
+		body.put("isConsignacao", true);
+		body.put("partnerId", partnerB.getId().toString());
+		body.put("commissionValue", 800);
+		mockMvc
+				.perform(putRequest(car.getId(), body).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.partnerId").value(partnerB.getId().toString()))
+				.andExpect(jsonPath("$.commissionValue").value(800));
+
+		assertPartner(partnerA, 1, "0.00");
+		assertPartner(partnerB, 2, "0.00");
+		assertThat(purchasesCount(client)).isEqualTo(1);
+		assertThat(transactionRepository.count()).isZero();
+	}
+
+	/**
+	 * TASK-003 AC C.3 applied to the {@code PUT}: absent {@code observacoes}, {@code destaque} and
+	 * photos are kept; every other optional field is replaced (null included); {@code isConsignacao}
+	 * and {@code garantiaMeses} null become {@code false}/0. Sale state is not part of the request.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aPutWithoutObservacoesDestaqueAndPhotosKeepsThemAndReplacesTheRest() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.observacoes("Revisão feita").destaque(true).descricao("Antiga").garantiaMeses(24).consignacao(true)
+				.precoCompra(new BigDecimal("15000.00")).build());
+		car.addImage(CarImage.builder().url("https://img/old.jpg").thumbnailUrl("https://img/old-t.jpg").position(0).build());
+		carRepository.saveAndFlush(car);
+
+		ObjectNode body = validBody();
+		for (String absent : List.of("observacoes", "destaque", "images", "imageThumbnails", "isConsignacao", "garantiaMeses")) {
+			body.remove(absent);
+		}
+		body.putNull("descricao");
+		body.putNull("precoCompra");
+		body.put("vendido", true);
+		body.put("precoVenda", 1);
+		JsonNode updated = objectMapper.readTree(mockMvc
+				.perform(putRequest(car.getId(), body).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isOk())
+				.andReturn()
+				.getResponse()
+				.getContentAsString());
+
+		assertThat(fieldNames(updated)).containsExactlyInAnyOrderElementsOf(BACK_OFFICE_CAR_KEYS);
+		assertThat(updated.get("marca").asString()).isEqualTo("BMW");
+		assertThat(updated.get("observacoes").asString()).isEqualTo("Revisão feita");
+		assertThat(updated.get("destaque").asBoolean()).isTrue();
+		assertThat(updated.get("images")).hasSize(1);
+		assertThat(updated.get("images").get(0).asString()).isEqualTo("https://img/old.jpg");
+		assertThat(updated.get("imageThumbnails").get(0).asString()).isEqualTo("https://img/old-t.jpg");
+		assertThat(updated.get("descricao").isNull()).isTrue();
+		assertThat(updated.get("precoCompra").isNull()).isTrue();
+		assertThat(updated.get("isConsignacao").asBoolean()).isFalse();
+		assertThat(updated.get("garantiaMeses").asInt()).isZero();
+		assertThat(updated.get("vendido").asBoolean()).isFalse();
+		assertThat(updated.get("precoVenda").isNull()).isTrue();
+		JsonNode reread = getJson(get("/api/backoffice/cars/{id}", car.getId()));
+		assertThat(reread.get("observacoes").asString()).isEqualTo("Revisão feita");
+		assertThat(reread.get("images")).hasSize(1);
+	}
+
+	/**
+	 * TASK-003 AC C.3 applied to the {@code PUT}: {@code ""} (or only spaces) clears {@code
+	 * observacoes}, text replaces it, {@code []} removes every photo and {@code destaque} {@code false}
+	 * removes the highlight.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aPutWithBlankObservacoesEmptyPhotosAndDestaqueFalseClearsThem() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().observacoes("Revisão feita").destaque(true).build());
+		car.addImage(CarImage.builder().url("https://img/old.jpg").position(0).build());
+		carRepository.saveAndFlush(car);
+
+		ObjectNode cleared = validBody();
+		cleared.put("observacoes", "   ");
+		cleared.put("destaque", false);
+		cleared.putArray("images");
+		cleared.putArray("imageThumbnails");
+		JsonNode afterClear = getJson(putRequest(car.getId(), cleared));
+		assertThat(afterClear.get("observacoes").isNull()).isTrue();
+		assertThat(afterClear.get("destaque").asBoolean()).isFalse();
+		assertThat(afterClear.get("images")).isEmpty();
+		assertThat(carRepository.countByDestaqueTrue()).isZero();
+
+		ObjectNode withText = validBody();
+		withText.put("observacoes", "Pneus novos");
+		assertThat(getJson(putRequest(car.getId(), withText)).get("observacoes").asString()).isEqualTo("Pneus novos");
+	}
+
+	/**
+	 * AC A.5/C.7: a {@code PUT} that turns on the 9th highlight is a 409 that writes nothing: not the
+	 * other fields, and not the reconciliation of the sold consignment car it also moves to another
+	 * partner (the limit check runs before any write).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aPutTurningOnTheNinthHighlightIsA409ThatWritesNothing() throws Exception {
+		for (int i = 0; i < 8; i++) {
+			carRepository.saveAndFlush(aPersistedCar().modelo("Featured " + i).destaque(true).build());
+		}
+		Partner partnerA = partnerRepository.saveAndFlush(Partner.builder().name("A").build());
+		Partner partnerB = partnerRepository.saveAndFlush(Partner.builder().name("B").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partnerA).commissionValue(new BigDecimal("500.00")).build());
+		mockMvc.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), null))).andExpect(status().isOk());
+
+		ObjectNode body = validBody();
+		body.put("destaque", true);
+		body.put("isConsignacao", true);
+		body.put("partnerId", partnerB.getId().toString());
+		body.put("commissionValue", 800);
+		mockMvc
+				.perform(putRequest(car.getId(), body).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isConflict())
+				.andExpect(jsonPath("$.message").value("Limite de 8 carros em destaque atingido"));
+
+		Car reloaded = carRepository.findById(car.getId()).orElseThrow();
+		assertThat(reloaded.getMarca()).isEqualTo("Audi");
+		assertThat(reloaded.isDestaque()).isFalse();
+		assertPartner(partnerA, 1, "500.00");
+		assertPartner(partnerB, 0, "0.00");
+	}
+
+	/**
+	 * AC A.1: {@code PUT} with a {@code partnerId} that does not exist is a 404, for an unsold car and
+	 * for a sold one (where the partner is loaded by the row lock); nothing changes.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aPutWithAnUnknownPartnerIsA404ThatChangesNothing() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("A").build());
+		Car unsold = carRepository.saveAndFlush(aPersistedCar().build());
+		Car sold = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).build());
+		mockMvc.perform(sellRequest(sold.getId(), new SellCarRequest(new BigDecimal("21000.00"), null))).andExpect(status().isOk());
+		UUID unknownPartner = UUID.randomUUID();
+		ObjectNode body = validBody();
+		body.put("isConsignacao", true);
+		body.put("partnerId", unknownPartner.toString());
+
+		for (Car car : List.of(unsold, sold)) {
+			mockMvc
+					.perform(putRequest(car.getId(), body).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+					.andExpect(status().isNotFound())
+					.andExpect(jsonPath("$.message").value("Parceiro nao encontrado: " + unknownPartner));
+			assertThat(carRepository.findById(car.getId()).orElseThrow().getMarca()).isEqualTo("Audi");
+		}
+		assertPartner(partner, 1, "500.00");
+	}
+
+	/**
+	 * AC A.1: selling to a client that does not exist is a 404 that changes nothing (the car stays
+	 * unsold, no transaction, no partner counter).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void sellingToAnUnknownClientIsA404ThatChangesNothing() throws Exception {
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("A").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).build());
+		UUID unknownClient = UUID.randomUUID();
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), unknownClient)))
+				.andExpect(status().isNotFound())
+				.andExpect(jsonPath("$.message").value("Cliente nao encontrado: " + unknownClient));
+
+		assertThat(carRepository.findById(car.getId()).orElseThrow().isVendido()).isFalse();
+		assertThat(transactionRepository.count()).isZero();
+		assertPartner(partner, 0, "0.00");
+	}
+
+	/**
+	 * AC A.1: a car that does not exist is a 404 with the documented message on {@code PUT}, {@code
+	 * DELETE} (as {@code ADMIN}), {@code sell} and {@code revert-sale}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void anUnknownCarIsA404OnEveryNewOperation() throws Exception {
+		UUID unknown = UUID.randomUUID();
+		RequestPostProcessor admin = jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE));
+		List<MockHttpServletRequestBuilder> requests = List.of(
+				putRequest(unknown, validCarRequest()),
+				delete("/api/backoffice/cars/{id}", unknown),
+				sellRequestWithoutToken(unknown, new SellCarRequest(new BigDecimal("21000.00"), null)),
+				post("/api/backoffice/cars/{id}/revert-sale", unknown));
+
+		for (MockHttpServletRequestBuilder request : requests) {
+			mockMvc
+					.perform(request.with(admin))
+					.andExpect(status().isNotFound())
+					.andExpect(jsonPath("$.message").value("Carro nao encontrado: " + unknown));
+		}
+	}
+
+	/**
+	 * AC A.2: a token without a role is 403 on {@code PUT}, {@code DELETE}, {@code sell} and {@code
+	 * revert-sale}, and nothing changes.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aTokenWithoutARoleIsForbiddenOnEveryNewOperation() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+		List<MockHttpServletRequestBuilder> requests = List.of(
+				putRequest(car.getId(), validCarRequest()),
+				delete("/api/backoffice/cars/{id}", car.getId()),
+				sellRequestWithoutToken(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), null)),
+				post("/api/backoffice/cars/{id}/revert-sale", car.getId()));
+
+		for (MockHttpServletRequestBuilder request : requests) {
+			mockMvc.perform(request.with(withoutRole())).andExpect(status().isForbidden());
+		}
+
+		Car reloaded = carRepository.findById(car.getId()).orElseThrow();
+		assertThat(reloaded.getMarca()).isEqualTo("Audi");
+		assertThat(reloaded.isVendido()).isFalse();
+	}
+
+	/**
+	 * AC C.2: {@code ?deleteTransactions=abc} is a 400 with the documented message, and the car stays.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aDeleteTransactionsValueThatIsNotABooleanIsA400() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId())
+						.queryParam("deleteTransactions", "abc")
+						.with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value("Parametro 'deleteTransactions' com valor invalido"));
+
+		assertThat(carRepository.existsById(car.getId())).isTrue();
+	}
+
+	/**
+	 * AC B.4/C.2: deleting a sold consignment car with {@code deleteTransactions=false} keeps its
+	 * transactions (without car) and changes no counter; with the default it deletes them and
+	 * decrements only the buyer. The partner never changes. Photos go with the car; a lead about it
+	 * stays, without car.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingASoldConsignmentCarNeverTouchesThePartnerAndOnlyTheDefaultTouchesTheBuyer() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("A").build());
+		Car keepTransactions = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).build());
+		keepTransactions.addImage(CarImage.builder().url("https://img/a.jpg").position(0).build());
+		carRepository.saveAndFlush(keepTransactions);
+		Car deleteTransactions = carRepository.saveAndFlush(aPersistedCar()
+				.consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).build());
+		mockMvc.perform(sellRequest(keepTransactions.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId()))).andExpect(status().isOk());
+		mockMvc.perform(sellRequest(deleteTransactions.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId()))).andExpect(status().isOk());
+		jdbcTemplate.update(
+				"INSERT INTO leads (nome, email, telefone, mensagem, car_id, origem, status) VALUES"
+						+ " ('Rui', 'rui@example.com', '912345678', 'Ola', ?, 'website', 'ativo')",
+				keepTransactions.getId());
+		UUID keptTransaction = transactionRepository.findByCarId(keepTransactions.getId()).get(0).getId();
+		assertThat(purchasesCount(client)).isEqualTo(2);
+		assertPartner(partner, 2, "1000.00");
+		RequestPostProcessor admin = jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE));
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", keepTransactions.getId()).queryParam("deleteTransactions", "false").with(admin))
+				.andExpect(status().isNoContent());
+
+		assertThat(purchasesCount(client)).isEqualTo(2);
+		assertPartner(partner, 2, "1000.00");
+		assertThat(transactionRepository.findById(keptTransaction).orElseThrow().getCar()).isNull();
+		assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM car_images", Integer.class)).isZero();
+		assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM leads WHERE car_id IS NULL AND nome = 'Rui'", Integer.class)).isEqualTo(1);
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", deleteTransactions.getId()).with(admin))
+				.andExpect(status().isNoContent());
+
+		assertThat(purchasesCount(client)).isEqualTo(1);
+		assertPartner(partner, 2, "1000.00");
+		assertThat(transactionRepository.findAll()).extracting(Transaction::getId).containsExactly(keptTransaction);
+	}
+
+	/**
+	 * AC C.5 and M12: {@code precoVenda} with 3 decimal places is a 400 naming the field and changes
+	 * nothing; with 1 decimal place it sells, and the stored value reads back with exactly 2 (asserted
+	 * on the body text: JsonPath drops the trailing zero).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void precoVendaHasAtMostTwoDecimalPlaces() throws Exception {
+		Car car = carRepository.saveAndFlush(aPersistedCar().build());
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("20000.005"), null)))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value(startsWith("precoVenda: ")));
+		assertThat(carRepository.findById(car.getId()).orElseThrow().isVendido()).isFalse();
+		assertThat(transactionRepository.count()).isZero();
+
+		mockMvc
+				.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("20000.5"), null)))
+				.andExpect(status().isOk());
+		mockMvc
+				.perform(get("/api/backoffice/cars/{id}", car.getId()).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(content().string(containsString("\"precoVenda\":20000.50")));
+	}
+
+	/**
+	 * AC C.9: a consignment sale to a client runs a fixed number of statements, whatever the photos:
+	 * the active-user lookup, the 3 row locks (car, partner, client), the photos of the response (one
+	 * batch), the {@code INSERT} of the sale transaction and the 3 {@code UPDATE}s; its reversal the
+	 * same with a {@code SELECT} + {@code DELETE} of the sale transaction instead of the {@code
+	 * INSERT}. The response reads only the ids of partner and client, so a partner field mapped into
+	 * the DTO, or a lock that loads more than its row, fails here.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aConsignmentSaleAndItsReversalRunAFixedNumberOfStatements() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("Auto Silva").build());
+		Car car = aPersistedCar().consignacao(true).partner(partner).commissionValue(new BigDecimal("500.00")).build();
+		for (int position = 0; position < 3; position++) {
+			car.addImage(CarImage.builder().url("https://img/" + position + ".jpg").position(position).build());
+		}
+		Car saved = carRepository.saveAndFlush(car);
+
+		long saleStatements = countStatements(() -> mockMvc
+				.perform(sellRequest(saved.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId())))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.images.length()").value(3)));
+		long reversalStatements = countStatements(() -> getJson(post("/api/backoffice/cars/{id}/revert-sale", saved.getId())));
+
+		assertThat(saleStatements).isEqualTo(9);
+		assertThat(reversalStatements).isEqualTo(10);
+	}
+
+	/**
+	 * AC D.5 / requirement 5: after a {@code PUT}, a sale, a reversal and a deletion, the public
+	 * detail, listing and highlights show exactly the 18 public keys; a sold car leaves the listing
+	 * and the highlights (its detail still answers, with {@code vendido} true) and comes back after
+	 * the reversal; a deleted car is a 404.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void thePublicSiteShowsOnlyThePublicKeysAfterEachOperationAndASoldCarLeavesTheListing() throws Exception {
+		Client client = clientRepository.saveAndFlush(Client.builder().name("Ana").phone("912345678").build());
+		Partner partner = partnerRepository.saveAndFlush(Partner.builder().name("A").build());
+		Car car = carRepository.saveAndFlush(aPersistedCar().destaque(true).build());
+		ObjectNode body = validBody();
+		body.put("isConsignacao", true);
+		body.put("partnerId", partner.getId().toString());
+		body.put("commissionValue", 750);
+		body.put("precoCompra", 18000);
+		body.put("dataCompra", "2026-07-15");
+		body.remove("destaque");
+
+		getJson(putRequest(car.getId(), body));
+		assertPublicView(car.getId(), true);
+
+		mockMvc.perform(sellRequest(car.getId(), new SellCarRequest(new BigDecimal("21000.00"), client.getId()))).andExpect(status().isOk());
+		assertPublicView(car.getId(), false);
+
+		getJson(post("/api/backoffice/cars/{id}/revert-sale", car.getId()));
+		assertPublicView(car.getId(), true);
+
+		mockMvc
+				.perform(delete("/api/backoffice/cars/{id}", car.getId()).with(jwt().authorities(new SimpleGrantedAuthority(ADMIN_ROLE))))
+				.andExpect(status().isNoContent());
+		mockMvc.perform(get("/api/cars/{id}", car.getId())).andExpect(status().isNotFound());
+	}
+
+	// ---------------------------------------------------------------------------------------------
 	// Helpers
 	// ---------------------------------------------------------------------------------------------
+
+	private static Car.CarBuilder aSoldCar(Client client) {
+		return aPersistedCar()
+				.vendido(true)
+				.precoVenda(new BigDecimal("21000.00"))
+				.dataVenda(OffsetDateTime.parse("2026-09-01T10:00:00Z"))
+				.client(client);
+	}
+
+	/** A {@code POST .../sell} as {@code USER} with the given body. */
+	private MockHttpServletRequestBuilder sellRequest(UUID carId, SellCarRequest request) {
+		return sellRequestWithoutToken(carId, request).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE)));
+	}
+
+	private MockHttpServletRequestBuilder sellRequestWithoutToken(UUID carId, SellCarRequest request) {
+		return post("/api/backoffice/cars/{id}/sell", carId)
+				.contentType(MediaType.APPLICATION_JSON)
+				.content(objectMapper.writeValueAsString(request));
+	}
+
+	private MockHttpServletRequestBuilder putRequest(UUID carId, Object body) {
+		return put("/api/backoffice/cars/{id}", carId)
+				.contentType(MediaType.APPLICATION_JSON)
+				.content(objectMapper.writeValueAsString(body));
+	}
+
+	/** Something {@link #countStatements} runs: a request, which may throw. */
+	@FunctionalInterface
+	private interface Request {
+		void perform() throws Exception;
+	}
+
+	/** Runs the request with Hibernate statistics on and returns the statements it prepared. */
+	private long countStatements(Request request) throws Exception {
+		Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+		statistics.setStatisticsEnabled(true);
+		statistics.clear();
+		try {
+			request.perform();
+			return statistics.getPrepareStatementCount();
+		} finally {
+			statistics.setStatisticsEnabled(false);
+		}
+	}
+
+	private int purchasesCount(Client client) {
+		return clientRepository.findById(client.getId()).orElseThrow().getPurchasesCount();
+	}
+
+	private void assertPartner(Partner partner, int carsCount, String totalCommission) {
+		Partner reloaded = partnerRepository.findById(partner.getId()).orElseThrow();
+		assertThat(reloaded.getCarsCount()).as("cars_count of %s", partner.getName()).isEqualTo(carsCount);
+		assertThat(reloaded.getTotalCommission())
+				.as("total_commission of %s", partner.getName())
+				.isEqualByComparingTo(totalCommission);
+	}
+
+	/**
+	 * Asserts the 18 public keys on the detail and, when listed, on the listing and highlights (the
+	 * car is the only one, featured); when not listed, that it is in neither.
+	 */
+	private void assertPublicView(UUID carId, boolean listed) throws Exception {
+		JsonNode detail = objectMapper.readTree(mockMvc.perform(get("/api/cars/{id}", carId))
+				.andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+		JsonNode listing = objectMapper.readTree(mockMvc.perform(get("/api/cars"))
+				.andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+		JsonNode highlights = objectMapper.readTree(mockMvc.perform(get("/api/cars/highlights"))
+				.andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+
+		assertThat(fieldNames(detail)).containsExactlyInAnyOrderElementsOf(PUBLIC_CAR_KEYS);
+		assertThat(detail.get("vendido").asBoolean()).isEqualTo(!listed);
+		if (listed) {
+			assertThat(listing.get("content")).hasSize(1);
+			assertThat(fieldNames(listing.get("content").get(0))).containsExactlyInAnyOrderElementsOf(PUBLIC_CAR_KEYS);
+			assertThat(highlights).hasSize(1);
+			assertThat(fieldNames(highlights.get(0))).containsExactlyInAnyOrderElementsOf(PUBLIC_CAR_KEYS);
+		} else {
+			assertThat(listing.get("content")).isEmpty();
+			assertThat(highlights).isEmpty();
+		}
+	}
 
 	/** A bearer token with no role: what Spring Security 7 builds when the roles claim is empty. */
 	private static RequestPostProcessor withoutRole() {

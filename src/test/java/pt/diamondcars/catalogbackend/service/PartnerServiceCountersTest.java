@@ -7,10 +7,9 @@ import org.junit.jupiter.api.Test;
 import pt.diamondcars.catalogbackend.domain.partner.Partner;
 
 /**
- * Unit tests for {@link PartnerService}'s counter hooks (TASK-004 AC D) — pure object mutation,
- * no repository or Spring context involved, since no caller exists yet in this task (TASK-010
- * wires {@code BackOfficeCarService#sell}/{@code revertSale} to these on sale/reversal). Proves
- * each hook correct in isolation ahead of that integration.
+ * Unit tests for {@link PartnerService}'s counter hooks (TASK-004 AC D): pure object mutation, no
+ * repository or Spring context involved. {@code BackOfficeCarService#sell}/{@code revertSale}/{@code
+ * update} call them since TASK-010, whose controller tests prove the integration.
  */
 class PartnerServiceCountersTest {
 
