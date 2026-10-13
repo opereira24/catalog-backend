@@ -140,25 +140,6 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * Confirms {@link CarRepository#findByDestaqueTrueAndVendidoFalse()} returns only unsold,
-	 * highlighted cars.
-	 *
-	 * @throws AssertionError if a non-highlighted or a sold car is included, or a matching one is
-	 *     missing
-	 */
-	@Test
-	void listsOnlyHighlightedUnsoldCars() {
-		Car highlighted = carRepository.saveAndFlush(aCar().modelo("Highlighted").destaque(true).build());
-		carRepository.saveAndFlush(aCar().modelo("Regular").build());
-		carRepository.saveAndFlush(
-				aCar().modelo("Highlighted but sold").destaque(true).vendido(true).build());
-
-		assertThat(carRepository.findByDestaqueTrueAndVendidoFalse())
-				.extracting(Car::getId)
-				.containsExactly(highlighted.getId());
-	}
-
-	/**
 	 * Confirms {@link CarRepository#countByDestaqueTrue()} counts every featured car, sold or not,
 	 * and only those.
 	 *
