@@ -23,14 +23,6 @@ import org.springframework.data.repository.query.Param;
 public interface CarRepository extends JpaRepository<Car, UUID>, JpaSpecificationExecutor<Car> {
 
 	/**
-	 * Lists cars flagged as highlighted and not yet sold — the set shown on the site's homepage
-	 * carousel.
-	 *
-	 * @return cars where {@code destaque = true} and {@code vendido = false}
-	 */
-	List<Car> findByDestaqueTrueAndVendidoFalse();
-
-	/**
 	 * Lists cars flagged as highlighted and not yet sold, most recently created first with {@code
 	 * id} ascending as a tiebreaker, capped by {@code pageable} — backs {@code
 	 * GET /api/cars/highlights}, which must never return more than 8 cars.
