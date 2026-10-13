@@ -61,6 +61,15 @@ do back-office portados do `dcbo-backend`.
   `AbstractAuditableDomainEntity` (+ `updated_at`), iguais ao `dcbo-backend`.
 - Repositórios só com métodos que têm consumidor em código de produção; não portar métodos que
   só os testes do `dcbo-backend` usavam.
+- `created_at` é escrito pelo `@CreationTimestamp` com o relógio da JVM (ticks de ~15,6 ms no
+  Windows, medição em `web/CLAUDE.md`): gravações seguidas empatam com frequência, e com empate o
+  PostgreSQL não garante ordem (numa tabela pequena devolve-as, na prática, pela ordem física, a
+  de inserção). Um teste que afirme ordem por
+  `created_at` fixa os instantes por `UPDATE` nativo numa ordem diferente da de inserção e do seu
+  inverso, para que sem o `UPDATE` falhe sempre e não só em alguns ticks
+  (`CarRepositoryTest#setCreatedAt`, TASK-011). Uma query paginada ordenada por `created_at` leva
+  sempre `id` como desempate (`CarQueryService#DEFAULT_SORT`,
+  `findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDescIdAsc`).
 - Associações `@ManyToOne` sempre `LAZY`. `lead.getCar().getId()` fora de transação é seguro
   (o Hibernate responde ao id do proxy sem o carregar, `LeadForwardPayload#from`); qualquer
   outro getter do carro fora de transação dá `LazyInitializationException`.

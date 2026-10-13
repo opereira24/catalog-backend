@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
-import org.springframework.data.domain.PageRequest;
 import pt.diamondcars.catalogbackend.domain.client.Client;
 import pt.diamondcars.catalogbackend.domain.partner.Partner;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
@@ -27,6 +26,9 @@ import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 class CarRepositoryTest extends AbstractPostgresIntegrationTest {
+
+	/** Fixed {@code created_at} the ordering tests pin their cars to (and to offsets of it). */
+	private static final OffsetDateTime BASE_CREATED_AT = OffsetDateTime.parse("2026-01-01T12:00:00Z");
 
 	@Autowired
 	private CarRepository carRepository;
@@ -138,25 +140,6 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * Confirms {@link CarRepository#findByVendidoFalseOrderByCreatedAtDesc(org.springframework.data.domain.Pageable)}
-	 * excludes sold cars and returns the rest most recently created first.
-	 *
-	 * @throws AssertionError if a sold car is included, an unsold one is missing, or the order is
-	 *     wrong
-	 */
-	@Test
-	void listsOnlyUnsoldCarsMostRecentlyCreatedFirst() {
-		Car firstUnsold = carRepository.saveAndFlush(aCar().modelo("Unsold 1").build());
-		Car secondUnsold = carRepository.saveAndFlush(aCar().modelo("Unsold 2").build());
-		carRepository.saveAndFlush(aCar().modelo("Sold").vendido(true).build());
-
-		assertThat(carRepository.findByVendidoFalseOrderByCreatedAtDesc(PageRequest.of(0, 10))
-				.getContent())
-				.extracting(Car::getId)
-				.containsExactly(secondUnsold.getId(), firstUnsold.getId());
-	}
-
-	/**
 	 * Confirms {@link CarRepository#findByDestaqueTrueAndVendidoFalse()} returns only unsold,
 	 * highlighted cars.
 	 *
@@ -197,6 +180,11 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 	 * {@link CarRepository#existsByClientId(UUID)}) see only the cars of that client, most recent
 	 * first.
 	 *
+	 * <p>The three cars' {@code created_at} are pinned by {@link #setCreatedAt} so that the expected
+	 * order ({@code b, a, c}) is neither the insertion order nor its reverse: without the pinning,
+	 * no combination of {@code @CreationTimestamp} ties can produce it, so the test fails every time
+	 * instead of passing or failing with the clock tick.
+	 *
 	 * @throws AssertionError if another client's car is included, the order is wrong, or {@code
 	 *     existsByClientId} answers wrongly
 	 */
@@ -208,13 +196,17 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 		entityManager.persist(client);
 		entityManager.persist(otherClient);
 		entityManager.persist(clientWithoutCars);
-		Car first = carRepository.saveAndFlush(aCar().client(client).build());
-		Car second = carRepository.saveAndFlush(aCar().client(client).build());
+		Car a = carRepository.saveAndFlush(aCar().client(client).build());
+		Car b = carRepository.saveAndFlush(aCar().client(client).build());
+		Car c = carRepository.saveAndFlush(aCar().client(client).build());
 		carRepository.saveAndFlush(aCar().client(otherClient).build());
+		setCreatedAt(a, BASE_CREATED_AT.plusSeconds(1));
+		setCreatedAt(b, BASE_CREATED_AT.plusSeconds(2));
+		setCreatedAt(c, BASE_CREATED_AT);
 
 		assertThat(carRepository.findByClientIdOrderByCreatedAtDesc(client.getId()))
 				.extracting(Car::getId)
-				.containsExactly(second.getId(), first.getId());
+				.containsExactly(b.getId(), a.getId(), c.getId());
 		assertThat(carRepository.existsByClientId(client.getId())).isTrue();
 		assertThat(carRepository.existsByClientId(clientWithoutCars.getId())).isFalse();
 	}
@@ -223,6 +215,9 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 	 * Confirms the partner lookups ({@link
 	 * CarRepository#findByPartnerIdOrderByCreatedAtDesc(UUID)}, {@link
 	 * CarRepository#existsByPartnerId(UUID)}) see only the cars of that partner, most recent first.
+	 *
+	 * <p>{@code created_at} is pinned the same way, and for the same reason, as in {@link
+	 * #findsTheCarsOfAClientMostRecentlyCreatedFirst()}.
 	 *
 	 * @throws AssertionError if another partner's car is included, the order is wrong, or {@code
 	 *     existsByPartnerId} answers wrongly
@@ -235,14 +230,37 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 		entityManager.persist(partner);
 		entityManager.persist(otherPartner);
 		entityManager.persist(partnerWithoutCars);
-		Car first = carRepository.saveAndFlush(aCar().consignacao(true).partner(partner).build());
-		Car second = carRepository.saveAndFlush(aCar().consignacao(true).partner(partner).build());
+		Car a = carRepository.saveAndFlush(aCar().consignacao(true).partner(partner).build());
+		Car b = carRepository.saveAndFlush(aCar().consignacao(true).partner(partner).build());
+		Car c = carRepository.saveAndFlush(aCar().consignacao(true).partner(partner).build());
 		carRepository.saveAndFlush(aCar().consignacao(true).partner(otherPartner).build());
+		setCreatedAt(a, BASE_CREATED_AT.plusSeconds(1));
+		setCreatedAt(b, BASE_CREATED_AT.plusSeconds(2));
+		setCreatedAt(c, BASE_CREATED_AT);
 
 		assertThat(carRepository.findByPartnerIdOrderByCreatedAtDesc(partner.getId()))
 				.extracting(Car::getId)
-				.containsExactly(second.getId(), first.getId());
+				.containsExactly(b.getId(), a.getId(), c.getId());
 		assertThat(carRepository.existsByPartnerId(partner.getId())).isTrue();
 		assertThat(carRepository.existsByPartnerId(partnerWithoutCars.getId())).isFalse();
+	}
+
+	/**
+	 * Overwrites a saved car's {@code created_at} with a native {@code UPDATE}, in the test's own
+	 * transaction. {@code @CreationTimestamp} reads the JVM clock, which on Windows only moves every
+	 * ~15.6 ms, so cars saved back to back usually share the same instant (see {@code
+	 * domain/CLAUDE.md}); a test that asserts an order by {@code created_at} has to pin it.
+	 *
+	 * @param car a car already flushed to the database
+	 * @param createdAt the instant to store
+	 * @throws AssertionError if the {@code UPDATE} does not hit exactly one row
+	 */
+	private void setCreatedAt(Car car, OffsetDateTime createdAt) {
+		int updated = entityManager
+				.createNativeQuery("UPDATE cars SET created_at = :createdAt WHERE id = :id")
+				.setParameter("createdAt", createdAt)
+				.setParameter("id", car.getId())
+				.executeUpdate();
+		assertThat(updated).as("rows updated for car %s", car.getId()).isEqualTo(1);
 	}
 }
