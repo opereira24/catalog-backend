@@ -34,6 +34,7 @@ import pt.diamondcars.catalogbackend.domain.transaction.TransactionRepository;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 import pt.diamondcars.catalogbackend.web.dto.CarRequest;
 import pt.diamondcars.catalogbackend.web.dto.ClientRequest;
+import pt.diamondcars.catalogbackend.web.dto.HighlightRequest;
 import pt.diamondcars.catalogbackend.web.dto.LeadRequest;
 import pt.diamondcars.catalogbackend.web.dto.LeadResponse;
 import pt.diamondcars.catalogbackend.web.dto.PartnerRequest;
@@ -347,6 +348,29 @@ class CarSaleConcurrencyTest extends AbstractPostgresIntegrationTest {
 		assertThat(reloadedA.getTotalCommission()).isEqualByComparingTo("0.00");
 		assertThat(reloadedB.getCarsCount()).isEqualTo(2);
 		assertThat(reloadedB.getTotalCommission()).isEqualByComparingTo("800.00");
+	}
+
+	/**
+	 * The car lock before the highlight advisory lock (AC C.1.d) changes the edge case TASK-003
+	 * documented: two requests featuring the same car with 7 others featured. The second waits for
+	 * the first, then sees the car already featured and succeeds without asking for a slot (before,
+	 * it counted 8 and got 409 although the car ended up featured).
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void featuringTheSameCarTwiceAtTheLimitSucceedsTwiceAndFeaturesItOnce() throws Exception {
+		for (int i = 0; i < 7; i++) {
+			carRepository.saveAndFlush(aCar().destaque(true).build());
+		}
+		Car car = carRepository.saveAndFlush(aCar().build());
+
+		List<Throwable> outcomes = race(
+				() -> carService.highlight(car.getId(), new HighlightRequest(true)),
+				() -> carService.highlight(car.getId(), new HighlightRequest(true)));
+
+		assertThat(outcomes).containsOnlyNulls();
+		assertThat(carRepository.countByDestaqueTrue()).isEqualTo(8);
 	}
 
 	/**
