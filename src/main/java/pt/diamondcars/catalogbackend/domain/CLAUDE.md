@@ -89,6 +89,14 @@ do back-office portados do `dcbo-backend`.
   (`CarRepositoryTest#setCreatedAt`, TASK-011). Uma query paginada ordenada por `created_at` leva
   sempre `id` como desempate (`CarQueryService#DEFAULT_SORT`,
   `findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDescIdAsc`).
+- **Escrita que devolve um DTO com `createdAt`/`updatedAt` usa `saveAndFlush`.** O
+  `@CreationTimestamp`/`@UpdateTimestamp` só é preenchido quando o Hibernate corre o
+  `INSERT`/`UPDATE`, ou seja, no flush; com `save` (id gerado) ou só dirty-checking o serviço mapeia
+  o DTO antes disso e os timestamps saem `null` (create) ou antigos (update). Medido na TASK-020 em
+  8 métodos de `ClientService`, `PartnerService`, `TransactionService` e `AppUserService`. Um
+  `PUT`/`PATCH` que não muda nenhum campo continua a não gravar nada e a devolver o `updatedAt`
+  anterior (correto). Prova: `*ControllerTest#*CarriesThe*` (TASK-020), que comparam a resposta com
+  a linha na BD por `support/WrittenTimestamps`.
 - Associações `@ManyToOne` sempre `LAZY`. `lead.getCar().getId()` fora de transação é seguro
   (o Hibernate responde ao id do proxy sem o carregar, `BackOfficeLeadResponse#from`); qualquer
   outro getter do carro fora de transação dá `LazyInitializationException`.

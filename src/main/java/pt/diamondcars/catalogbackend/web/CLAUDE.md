@@ -192,6 +192,20 @@ cenário inverso (o escritor grava primeiro, K-PD2) o portão é a ligação do 
 no K8. Com 2 workers no máximo (+ portão + a query de espera) cabe no pool por omissão:
 `@SpringBootTest` simples, contexto em cache partilhado, sem `@DirtiesContext`.
 
+**Provar a força de um lock** (`PESSIMISTIC_WRITE` vs `PESSIMISTIC_READ`, TASK-020): dois workers
+que editam a mesma linha atrás de um portão `SELECT ... FOR SHARE` sem commit, esperar até **2**
+sessões em `Lock`, commit, e afirmar que os dois terminam sem exceção. Com `PESSIMISTIC_WRITE`
+(`FOR NO KEY UPDATE`) os dois esperam no `SELECT` do lock e correm um a seguir ao outro; com
+`PESSIMISTIC_READ` (`FOR SHARE`) os dois tomam o lock partilhado, esperam no `UPDATE`, e depois do
+commit cada um espera pelo outro: `deadlock detected` (40P01, `CannotAcquireLockException`, um 500)
+ao fim do `deadlock_timeout`. **Com um só worker o mutante sobrevive**: o `FOR SHARE` do portão
+também bloqueia o `UPDATE` do mutante, por isso há 1 sessão em `Lock` nos dois modos. Os portões que
+escrevem a linha (`UPDATE`/`DELETE` sem commit, como no K8) também não distinguem os dois modos. Em
+`service/AppUserConcurrencyTest` (K-U6) e `service/BackOfficeLeadConcurrencyTest`
+(`twoConcurrentEditsOfTheSameLeadBothSucceed`), helper `whileShareLocked`. Os outros
+`findByIdForUpdate` (`ClientRepository`, `PartnerRepository`, `CarRepository`) ainda não têm este
+teste.
+
 ## Clientes e parceiros (TASK-004)
 
 `/api/backoffice/clients` e `/api/backoffice/partners` seguem a mesma convenção dos carros, com
@@ -402,7 +416,7 @@ Regras (cada uma com o cenário que a prova):
 
 `/api/backoffice/users` (CRUD + `PATCH /{id}/active`) e `GET /api/backoffice/me`, portados do
 `dcbo-backend` (lá `/api/users` e `/api/me`). Testes: `AppUserControllerTest` (#1 a #27),
-`service/AppUserConcurrencyTest` (K-U1 a K-U5), `AppUserRepositoryTest`.
+`service/AppUserConcurrencyTest` (K-U1 a K-U6), `AppUserRepositoryTest`.
 
 - **`hasRole('ADMIN')` na classe, `isAuthenticated()` só em `me()`.** O controller está mapeado em
   `BackOfficeApi.PREFIX` (não em `PREFIX + "/users"`) porque `/me` não vive debaixo de `/users`. Um
@@ -424,7 +438,8 @@ Regras (cada uma com o cenário que a prova):
   nome antigo). Contra um `DELETE` concorrente, sem lock o `UPDATE`/`DELETE` tocava 0 linhas e dava 500
   (`StaleStateException`); com ele, 404 (K-U2, K-U3). Ordem em `setActive`/`delete`: lock, verificação
   de "é o próprio", escrita.
-- **`create` com `saveAndFlush`**: o 201 traz `createdAt`/`updatedAt` gravados. Dois `POST` simultâneos
+- **`create` com `saveAndFlush`** (e `update`/`setActive` desde a TASK-020, ver `domain/CLAUDE.md`):
+  o 201 traz `createdAt`/`updatedAt` gravados, o 200 o `updatedAt` novo. Dois `POST` simultâneos
   com o mesmo `authSubject` passam os dois o `findByAuthSubject`; o segundo falha no índice único e sai
   como 409 genérico `Pedido em conflito com o estado atual dos dados` (K-U4), nunca 500. Aceite: sem
   código para distinguir a constraint.
