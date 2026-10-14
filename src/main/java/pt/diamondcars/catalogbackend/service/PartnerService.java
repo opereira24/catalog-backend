@@ -124,8 +124,11 @@ public class PartnerService {
 	 * {@code POST}/{@code PUT} of a car saves {@code partner_id} = this partner: if the car saved
 	 * first, the lock waits for its commit and the check, a new statement in {@code READ COMMITTED},
 	 * sees it (409); if the lock came first, the car's foreign key check waits and fails once this
-	 * deletion commits (that request gets 409, nothing saved). Without the lock, or with checking
-	 * before locking, both succeed and {@code ON DELETE SET NULL} leaves the car without partner.
+	 * deletion commits (a {@code POST}, or a {@code PUT} of an unsold car, gets 409, nothing saved).
+	 * A {@code PUT} of a sold car locks the partner in {@link BackOfficeCarService} before writing:
+	 * that lock waits, then finds the row deleted (404, nothing saved). Without the lock, or with
+	 * checking before locking, both succeed and {@code ON DELETE SET NULL} leaves the car without
+	 * partner.
 	 *
 	 * @param id the partner's id
 	 * @throws ResourceNotFoundException if no partner has this id (mapped to 404)
