@@ -14,7 +14,7 @@ import pt.diamondcars.catalogbackend.domain.car.CarImage;
  * {@code observacoes}. Internal fields ({@code precoCompra}, consignment, partner, client, sale) are
  * here and only here; the public {@link CarResponse} lists its own 18 keys and is untouched.
  *
- * <p>No {@code _id} (only the public projection has it) and no {@code syncedAt}. {@code
+ * <p>No {@code _id} (only the public projection has it). {@code
  * partnerId}/{@code clienteId} keep the frontend's JSON names over the English associations
  * (ADR-001, layer 3).
  *

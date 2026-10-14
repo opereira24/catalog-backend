@@ -31,9 +31,8 @@ import pt.diamondcars.catalogbackend.domain.support.AbstractAuditableDomainEntit
  * the public site ({@code dc}, through {@code CarResponse}) and the back-office manage: there is no
  * separate projection any more (TASK-001).
  *
- * <p>Ported from {@code dcbo-backend}'s {@code Car}, plus the two fields only this repo had:
- * {@link #observacoes} (public, shown on the site's detail page) and {@link #syncedAt} (no writer
- * left, never exposed, dropped by the cleanup migration that also retires lead forwarding).
+ * <p>Ported from {@code dcbo-backend}'s {@code Car}, plus the one field only this repo had: {@link
+ * #observacoes} (public, shown on the site's detail page).
  * Internal fields ({@link #precoCompra}, {@link #consignacao}, {@link #partner}, {@link #client},
  * ...) never reach the public API because {@code CarResponse} lists its fields explicitly.
  *
@@ -137,14 +136,6 @@ public class Car extends AbstractAuditableDomainEntity {
 	@ManyToOne(fetch = FetchType.LAZY)
 	@JoinColumn(name = "client_id")
 	private Client client;
-
-	/**
-	 * Last time a sync from {@code dcbo-backend} wrote this car. That sync never existed and nothing
-	 * writes this column any more; kept mapped only because the column still exists until the
-	 * cleanup migration drops it. Never exposed.
-	 */
-	@Column(name = "synced_at")
-	private OffsetDateTime syncedAt;
 
 	/**
 	 * {@code @BatchSize} fetches the {@link CarImage} collections of up to 50 cars in a single
