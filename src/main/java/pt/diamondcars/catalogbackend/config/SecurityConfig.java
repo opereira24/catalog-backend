@@ -166,6 +166,8 @@ public class SecurityConfig {
 	 *       {@link BadJwtException} (so 401), never calls the network, and one {@code WARN} at
 	 *       startup. Issuer without audience is rejected too: skipping the {@code aud} check would
 	 *       accept any token of the tenant issued for another API.
+	 *   <li>{@code audience} with whitespace at either end or a control character (a value pasted with
+	 *       a space or a newline): the same decoder and one {@code WARN} (TASK-008, A.3).
 	 *   <li>{@code issuerUri} not in the form Auth0 puts in {@code iss} ({@link Auth0Issuer}, e.g.
 	 *       the bare domain the Auth0 dashboard shows, or no trailing slash): the same decoder, and
 	 *       one {@code WARN} that names the problem. Never an exception: a typo in this variable must
@@ -195,6 +197,14 @@ public class SecurityConfig {
 							+ "endpoints protegidos respondem 401 (os publicos nao sao afetados)");
 			return rejectEveryToken();
 		}
+		if (isMalformedAudience(audience)) {
+			log.warn(
+					"AUTH0_AUDIENCE invalido, {}: tem espacos no inicio ou no fim ou caracteres de controlo. Todos os "
+							+ "tokens sao recusados e todos os endpoints protegidos respondem 401 (os publicos nao sao "
+							+ "afetados)",
+					Auth0Issuer.forLog(audience));
+			return rejectEveryToken();
+		}
 		Optional<String> issuerProblem = Auth0Issuer.problem(issuerUri);
 		if (issuerProblem.isPresent()) {
 			log.warn(
@@ -207,6 +217,17 @@ public class SecurityConfig {
 			return rejectEveryToken();
 		}
 		return auth0JwtDecoder(Auth0JwkSource.forIssuer(issuerUri, AUTH0_TIMEOUT), issuerUri, audience);
+	}
+
+	/**
+	 * Whether {@code AUTH0_AUDIENCE} was pasted with whitespace around it or carries a control
+	 * character (TASK-008, A.3). The {@code aud} check is an exact comparison, so such a value would
+	 * reject every real token anyway, but silently and after fetching keys; refusing it here says
+	 * why. Spaces in the middle are not refused: an Auth0 API identifier does not have to be a URL,
+	 * and nothing shows that Auth0 forbids them.
+	 */
+	private static boolean isMalformedAudience(String audience) {
+		return !audience.equals(audience.strip()) || audience.chars().anyMatch(Character::isISOControl);
 	}
 
 	/**
