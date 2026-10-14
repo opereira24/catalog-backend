@@ -258,7 +258,7 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 
 	/**
 	 * Acceptance criterion: {@code GET /api/cars/highlights} never returns more than 8 cars, nor any
-	 * sold one, even when more than 8 highlighted+unsold cars exist.
+	 * sold or non-highlighted one, even when more than 8 highlighted+unsold cars exist.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
@@ -274,7 +274,8 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 				.perform(get("/api/cars/highlights"))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.length()").value(8))
-				.andExpect(jsonPath("$[*].vendido").value(org.hamcrest.Matchers.everyItem(org.hamcrest.Matchers.is(false))));
+				.andExpect(jsonPath("$[*].vendido").value(org.hamcrest.Matchers.everyItem(org.hamcrest.Matchers.is(false))))
+				.andExpect(jsonPath("$[*].modelo").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasItem("Not highlighted"))));
 	}
 
 	/**
