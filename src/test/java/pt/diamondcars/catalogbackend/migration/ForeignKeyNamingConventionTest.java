@@ -2,6 +2,7 @@ package pt.diamondcars.catalogbackend.migration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
@@ -28,14 +29,16 @@ class ForeignKeyNamingConventionTest extends AbstractPostgresIntegrationTest {
 
 	/**
 	 * Every single-column foreign key of the {@code public} schema, as {@code table.column ->
-	 * referenced_table}, with the column name the ADR-001 rule expects for it.
+	 * referenced_table}, with the column name the ADR-001 rule expects for it and its {@code ON
+	 * DELETE} action ({@link SchemaCatalog#DELETE_RULE}).
 	 */
 	private static final String FOREIGN_KEYS_SQL =
 			"SELECT rel.relname || '.' || att.attname AS fk_column, "
 					+ "       ref.relname AS referenced_table, "
 					+ "       regexp_replace(ref.relname, 's$', '') || '_id' AS expected_column, "
 					+ "       att.attname AS actual_column, "
-					+ "       array_length(con.conkey, 1) AS column_count "
+					+ "       array_length(con.conkey, 1) AS column_count, "
+					+ "       " + SchemaCatalog.DELETE_RULE + " AS delete_rule "
 					+ "FROM pg_constraint con "
 					+ "JOIN pg_class rel ON rel.oid = con.conrelid "
 					+ "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
@@ -49,11 +52,19 @@ class ForeignKeyNamingConventionTest extends AbstractPostgresIntegrationTest {
 	/**
 	 * The positive rule: for every foreign key in {@code pg_constraint}, the column is named {@code
 	 * <referenced table without its final s>_id} ({@code cars -> car_id}, {@code partners ->
-	 * partner_id}, ...). Also pins the foreign keys measured on V1+V2, so one silently dropped by a
-	 * future migration fails here too.
+	 * partner_id}, ...), over every foreign key of {@code pg_constraint}, with no list of exceptions.
+	 * Also pins the foreign keys measured on V1+V2 together with their {@code ON DELETE} action
+	 * (TASK-008, C.2), so one silently dropped, added, or switched between {@code CASCADE} and {@code
+	 * SET NULL} by a future migration fails here too.
+	 *
+	 * <p>This is the only test of the {@code ON DELETE} actions: the former {@code
+	 * renamedForeignKeysStillSetNullOnDelete} checked three of them and was folded into this one.
+	 * Measured mutants: {@code notifications.lead_id} to {@code SET NULL} (M13, a deleted lead would
+	 * leave its notifications behind) and {@code cars.partner_id} to {@code CASCADE} (M14, deleting a
+	 * partner would delete the cars on consignment) both turn this test red.
 	 *
 	 * @throws AssertionError if any foreign key column breaks the rule, is multi-column, or the set
-	 *     of foreign keys changed
+	 *     of foreign keys or any {@code ON DELETE} action changed
 	 */
 	@Test
 	void everyForeignKeyColumnIsNamedAfterTheTableItReferences() {
@@ -66,17 +77,20 @@ class ForeignKeyNamingConventionTest extends AbstractPostgresIntegrationTest {
 					assertThat(fk.get("column_count")).isEqualTo(1);
 					assertThat(fk.get("actual_column")).isEqualTo(fk.get("expected_column"));
 				});
-		assertThat(foreignKeys)
-				.extracting(fk -> fk.get("fk_column"))
-				.containsExactlyInAnyOrder(
-						"car_images.car_id",
-						"cars.client_id",
-						"cars.partner_id",
-						"leads.car_id",
-						"notifications.lead_id",
-						"transactions.car_id",
-						"transactions.client_id",
-						"transactions.partner_id");
+		Map<Object, Object> deleteRuleByColumn = new HashMap<>();
+		foreignKeys.forEach(fk -> deleteRuleByColumn.put(fk.get("fk_column"), fk.get("delete_rule")));
+		assertThat(deleteRuleByColumn)
+				.as("one entry per foreign key (a column with two foreign keys would collapse here)")
+				.hasSameSizeAs(foreignKeys)
+				.containsExactlyInAnyOrderEntriesOf(Map.of(
+						"car_images.car_id", "CASCADE",
+						"cars.client_id", "SET NULL",
+						"cars.partner_id", "SET NULL",
+						"leads.car_id", "SET NULL",
+						"notifications.lead_id", "CASCADE",
+						"transactions.car_id", "SET NULL",
+						"transactions.client_id", "SET NULL",
+						"transactions.partner_id", "SET NULL"));
 	}
 
 	/**
@@ -129,34 +143,5 @@ class ForeignKeyNamingConventionTest extends AbstractPostgresIntegrationTest {
 				String.class);
 
 		assertThat(oldColumns).isEmpty();
-	}
-
-	/**
-	 * Confirms those three foreign keys detach rather than delete ({@code ON DELETE SET NULL}):
-	 * deleting a client or a car never deletes a car, a transaction or a lead.
-	 *
-	 * @throws AssertionError if any of the three FK columns has no foreign key, or the {@code
-	 *     delete_rule} is not {@code SET NULL}
-	 */
-	@Test
-	void renamedForeignKeysStillSetNullOnDelete() {
-		JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-
-		List<Map<String, Object>> foreignKeys = jdbcTemplate.queryForList(
-				"SELECT tc.table_name, kcu.column_name, rc.delete_rule "
-						+ "FROM information_schema.table_constraints tc "
-						+ "JOIN information_schema.key_column_usage kcu "
-						+ "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema "
-						+ "JOIN information_schema.referential_constraints rc "
-						+ "  ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema "
-						+ "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' "
-						+ "  AND ((tc.table_name = 'cars' AND kcu.column_name = 'client_id') "
-						+ "    OR (tc.table_name = 'transactions' AND kcu.column_name = 'client_id') "
-						+ "    OR (tc.table_name = 'leads' AND kcu.column_name = 'car_id'))");
-
-		assertThat(foreignKeys)
-				.as("the three FK columns must keep their ON DELETE SET NULL constraint: %s", foreignKeys)
-				.hasSize(3)
-				.allSatisfy(row -> assertThat(row.get("delete_rule")).isEqualTo("SET NULL"));
 	}
 }

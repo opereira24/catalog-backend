@@ -2,6 +2,10 @@ package pt.diamondcars.catalogbackend.migration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static pt.diamondcars.catalogbackend.migration.V1Fixture.CAR_WITH_NOTES;
+import static pt.diamondcars.catalogbackend.migration.V1Fixture.LEAD_WITHOUT_CAR;
+import static pt.diamondcars.catalogbackend.migration.V1Fixture.LEAD_WITH_CAR;
+import static pt.diamondcars.catalogbackend.migration.V1Fixture.LEAD_WITH_ORPHAN_CAR;
 
 import java.util.HashMap;
 import java.util.List;
@@ -26,7 +30,7 @@ import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
  * <p>Runs in its own PostgreSQL schema ({@value #SCHEMA}) of the shared Testcontainers database,
  * so it never touches the {@code public} schema the Spring-context tests migrate. {@link
  * #upgradeADatabaseHoldingV1Data()} migrates to V1 only, inserts representative V1 rows by SQL
- * (the only writer V1 ever had), snapshots every V1 column, then runs V2. The tests then compare
+ * ({@link V1Fixture}, shared with {@link V1ToLatestUpgradeTest}), snapshots every V1 column, then runs V2. The tests then compare
  * against that snapshot; the last one ({@link Order} 99) writes data and therefore runs last.
  *
  * <p>The upgrade targets V2 explicitly ({@code target("2")}): this test is about the V1 to V2
@@ -43,14 +47,6 @@ import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 class V1ToV2UpgradeTest extends AbstractPostgresIntegrationTest {
 
 	private static final String SCHEMA = "upgrade_v1_v2";
-
-	private static final UUID SOLD_CAR = UUID.fromString("11111111-1111-1111-1111-111111111111");
-	private static final UUID CAR_WITH_NOTES = UUID.fromString("22222222-2222-2222-2222-222222222222");
-	private static final UUID LEAD_WITH_CAR = UUID.fromString("aaaaaaaa-0000-0000-0000-000000000001");
-	private static final UUID LEAD_WITH_ORPHAN_CAR =
-			UUID.fromString("aaaaaaaa-0000-0000-0000-000000000002");
-	private static final UUID LEAD_WITHOUT_CAR = UUID.fromString("aaaaaaaa-0000-0000-0000-000000000003");
-	private static final UUID DELETED_CAR = UUID.fromString("99999999-9999-9999-9999-999999999999");
 
 	private static final String V1_CARS_COLUMNS =
 			"id, marca, modelo, ano, preco, km, cor, combustivel, descricao, observacoes, garantia_meses,"
@@ -83,7 +79,7 @@ class V1ToV2UpgradeTest extends AbstractPostgresIntegrationTest {
 		jdbc.execute("DROP SCHEMA IF EXISTS " + SCHEMA + " CASCADE");
 
 		flywayTargeting("1").migrate();
-		insertRepresentativeV1Data();
+		V1Fixture.insertRepresentativeV1Data(jdbc);
 		carsBefore = jdbc.queryForList("SELECT " + V1_CARS_COLUMNS + " FROM cars ORDER BY id");
 		carImagesBefore = jdbc.queryForList("SELECT " + V1_CAR_IMAGES_COLUMNS + " FROM car_images ORDER BY id");
 		leadsBefore =
@@ -228,49 +224,6 @@ class V1ToV2UpgradeTest extends AbstractPostgresIntegrationTest {
 				.locations("classpath:db/migration")
 				.target(version)
 				.load();
-	}
-
-	/**
-	 * Inserts the V1 shapes the production data can have: a sold car and a car with {@code
-	 * observacoes}/{@code synced_at}, with photos; a lead about an existing car already forwarded,
-	 * a lead about a car that no longer exists (V1 had no foreign key) that exhausted its forwarding
-	 * attempts, and a general contact without car.
-	 */
-	private void insertRepresentativeV1Data() {
-		jdbc.update(
-				"INSERT INTO cars (id, marca, modelo, ano, preco, km, cor, combustivel, vendido, created_at, updated_at) "
-						+ "VALUES (?, 'BMW', '320d', 2019, 25000.00, 60000, 'Preto', 'Diesel', true, "
-						+ "'2026-01-01T10:00:00Z', '2026-01-02T10:00:00Z')",
-				SOLD_CAR);
-		jdbc.update(
-				"INSERT INTO cars (id, marca, modelo, ano, preco, km, cor, combustivel, descricao, observacoes, "
-						+ "garantia_meses, destaque, synced_at, created_at, updated_at) "
-						+ "VALUES (?, 'Audi', 'A4', 2020, 28000.50, 40000, 'Branco', 'Gasolina', 'Como novo', "
-						+ "'Revisão feita', 12, true, '2026-02-01T09:00:00Z', '2026-02-01T08:00:00Z', "
-						+ "'2026-02-01T08:30:00Z')",
-				CAR_WITH_NOTES);
-		jdbc.update(
-				"INSERT INTO car_images (car_id, url, thumbnail_url, position) VALUES "
-						+ "(?, 'https://img/bmw-1.jpg', NULL, 0), "
-						+ "(?, 'https://img/audi-1.jpg', 'https://img/audi-1-t.jpg', 0), "
-						+ "(?, 'https://img/audi-2.jpg', NULL, 1)",
-				SOLD_CAR, CAR_WITH_NOTES, CAR_WITH_NOTES);
-		jdbc.update(
-				"INSERT INTO leads (id, nome, email, telefone, mensagem, car_id, carro_marca, carro_modelo, "
-						+ "origem, forwarded_at, created_at) "
-						+ "VALUES (?, 'Joana', 'joana@example.com', '911111111', 'Ainda disponível?', ?, 'Audi', "
-						+ "'A4', 'website', '2026-03-01T00:05:00Z', '2026-03-01T00:00:00Z')",
-				LEAD_WITH_CAR, CAR_WITH_NOTES);
-		jdbc.update(
-				"INSERT INTO leads (id, nome, telefone, car_id, carro_marca, carro_modelo, origem, "
-						+ "forward_attempts, created_at) "
-						+ "VALUES (?, 'Rui', '922222222', ?, 'Fiat', 'Punto', 'website', 5, '2026-03-02T00:00:00Z')",
-				LEAD_WITH_ORPHAN_CAR, DELETED_CAR);
-		jdbc.update(
-				"INSERT INTO leads (id, nome, telefone, mensagem, origem, created_at) "
-						+ "VALUES (?, 'Marta', '933333333', 'Contacto geral', 'website-contacto', "
-						+ "'2026-03-03T00:00:00Z')",
-				LEAD_WITHOUT_CAR);
 	}
 
 	private UUID leadCarId(UUID leadId) {
