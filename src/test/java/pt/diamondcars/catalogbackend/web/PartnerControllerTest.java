@@ -198,17 +198,19 @@ class PartnerControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * {@code GET /{id}} for an id that does not exist responds 404.
+	 * {@code GET /{id}} for an id that does not exist responds 404 naming the id.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void returns404ForAnUnknownPartnerId() throws Exception {
+		UUID id = UUID.randomUUID();
+
 		mockMvc
-				.perform(
-						get(PATH + "/{id}", UUID.randomUUID())
-								.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
-				.andExpect(status().isNotFound());
+				.perform(get(PATH + "/{id}", id).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isNotFound())
+				.andExpect(jsonPath("$.status").value(404))
+				.andExpect(jsonPath("$.message").value("Parceiro nao encontrado: " + id));
 	}
 
 	/**
@@ -233,6 +235,29 @@ class PartnerControllerTest extends AbstractPostgresIntegrationTest {
 				.andExpect(jsonPath("$.name").value("Parceiro Teste"))
 				.andExpect(jsonPath("$.carsCount").value(2))
 				.andExpect(jsonPath("$.totalCommission").value(100.00));
+	}
+
+	/**
+	 * {@code PUT /{id}} with a valid body for an id that does not exist responds 404 naming the id,
+	 * and creates nothing.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void updatingAnUnknownPartnerReturns404() throws Exception {
+		UUID id = UUID.randomUUID();
+
+		mockMvc
+				.perform(
+						put(PATH + "/{id}", id)
+								.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE)))
+								.contentType(MediaType.APPLICATION_JSON)
+								.content(objectMapper.writeValueAsString(validPartnerRequest())))
+				.andExpect(status().isNotFound())
+				.andExpect(jsonPath("$.status").value(404))
+				.andExpect(jsonPath("$.message").value("Parceiro nao encontrado: " + id));
+
+		assertThat(partnerRepository.count()).isZero();
 	}
 
 	/**
@@ -388,6 +413,22 @@ class PartnerControllerTest extends AbstractPostgresIntegrationTest {
 				.andExpect(status().isNoContent());
 
 		assertThat(partnerRepository.existsById(partner.getId())).isFalse();
+	}
+
+	/**
+	 * {@code DELETE /{id}} for an id that does not exist responds 404 naming the id.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void deletingAnUnknownPartnerReturns404() throws Exception {
+		UUID id = UUID.randomUUID();
+
+		mockMvc
+				.perform(delete(PATH + "/{id}", id).with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE))))
+				.andExpect(status().isNotFound())
+				.andExpect(jsonPath("$.status").value(404))
+				.andExpect(jsonPath("$.message").value("Parceiro nao encontrado: " + id));
 	}
 
 	/**
