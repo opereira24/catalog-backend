@@ -54,6 +54,17 @@ seria apanhado implicitamente pelo DSL e tirar a linha explícita não se notava
   recusar com aviso. O "Domain" do painel do Auth0 (`oteustand.eu.auth0.com`) **não** serve tal
   como está. Prova: `Auth0IssuerTest` (60+ valores), `MalformedAuth0IssuerTest` (decoder, aviso,
   zero pedidos ao tenant), `MalformedAuth0IssuerContextTest` (aplicação inteira arranca).
+- `http://localhost`/`127.0.0.1`/`[::1]` são aceites como issuer só para o `FakeAuth0` dos testes;
+  em produção apontam para a própria máquina, nunca para terceiros, e quem pode pôr a variável já
+  controla o serviço (decisão do PM, S-2 da review r3 da TASK-002: sem código).
+- **`AUTH0_AUDIENCE` com espaço, tab ou quebra de linha no início ou no fim, ou com um carácter de
+  controlo** (valor colado do painel com lixo à volta): o mesmo decoder que recusa tudo (401, zero
+  rede) e **um** `WARN` `AUTH0_AUDIENCE invalido, "<valor>": ...` no arranque (TASK-008). Sem isto o
+  resultado para o utilizador era o mesmo (o `aud` compara-se por igualdade exata), mas em silêncio e
+  depois de ir buscar as chaves. Espaços **no meio** não são recusados: um identifier de API do Auth0
+  não é obrigatoriamente um URL e nada mostra que o Auth0 os proíba. O valor vai para o log por
+  `Auth0Issuer.forLog` (aspas, só ASCII imprimível). Prova: `MalformedAuth0AudienceTest` (5 valores,
+  zero pedidos ao tenant, controlo com a audience certa).
 - **Nunca um issuer placeholder** (o `https://placeholder.auth0.com/` do `dcbo-backend`): um
   tenant Auth0 é de quem o registar primeiro, e esse terceiro passava a emitir tokens aceites;
   um tenant inexistente prendia cada pedido à espera de rede (o arquiteto mediu um `curl` a
@@ -65,7 +76,10 @@ seria apanhado implicitamente pelo DSL e tirar a linha explícita não se notava
   duas, nenhuma no arranque.
 - `typ` do token tem de ser `JWT` ou ausente (`JwtValidators` do Spring Security 7). O Auth0 emite
   `typ: JWT` por omissão; se o perfil de token da API for mudado para RFC 9068 (`at+jwt`), todos
-  os tokens passam a 401.
+  os tokens passam a 401, **sem nenhum `WARN`**. A verificação está no conjunto de
+  `JwtValidators.createDefaultWithIssuer` (medido na TASK-008: trocá-lo por só issuer + tempo aceita o
+  token `at+jwt`), não no processador do Nimbus. Prova: caso `typ at+jwt` em
+  `Auth0JwtDecoderTest#invalidTokenIsRejectedAsInvalid`.
 - **Auth0 inalcançável com config real = 500, deliberado.** Não é 401 de propósito (o token pode
   ser válido e o `dcbo` terminaria a sessão). O 500 sai por `sendError` no failure handler do
   filtro de bearer (`SecurityConfig.bearerAuthenticationFailureHandler`), com o corpo de erro do
