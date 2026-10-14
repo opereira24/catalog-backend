@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import java.math.BigDecimal;
-import java.time.OffsetDateTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -18,7 +17,7 @@ import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
  * {@code @DataJpaTest} for the {@link Lead} aggregate: confirms it round-trips through the real
  * {@code leads} table, that its declared defaults survive a save/reload cycle that actually hits
  * the database via their converters, that a lead outlives the car it is about ({@code car_id ON
- * DELETE SET NULL}, V2), and exercises {@link LeadRepository#findByForwardedAtIsNull()}.
+ * DELETE SET NULL}, V2).
  */
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
@@ -107,24 +106,4 @@ class LeadRepositoryTest extends AbstractPostgresIntegrationTest {
 		assertThat(reloaded.getCarroPreco()).isEqualByComparingTo("28000.00");
 	}
 
-	/**
-	 * Confirms {@link LeadRepository#findByForwardedAtIsNull()} returns only leads not yet
-	 * forwarded to {@code dcbo-backend}.
-	 *
-	 * @throws AssertionError if an already-forwarded lead is included, or a pending one is missing
-	 */
-	@Test
-	void findsOnlyLeadsNotYetForwarded() {
-		Lead pending = leadRepository.saveAndFlush(
-				Lead.builder().nome("Pendente").telefone("911111111").build());
-		leadRepository.saveAndFlush(Lead.builder()
-				.nome("Ja Encaminhado")
-				.telefone("922222222")
-				.forwardedAt(OffsetDateTime.now())
-				.build());
-
-		assertThat(leadRepository.findByForwardedAtIsNull())
-				.extracting(Lead::getId)
-				.containsExactly(pending.getId());
-	}
 }

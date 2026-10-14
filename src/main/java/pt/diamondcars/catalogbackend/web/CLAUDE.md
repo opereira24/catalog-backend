@@ -392,3 +392,55 @@ Regras (cada uma com o cenário que a prova):
   partilhadas por carros diferentes: K2, K3, K5, K6), `SERIALIZABLE`/`REPEATABLE READ` (obrigam a
   repetir pedidos em `40001`), advisory global de vendas (serializa vendas sem nada em comum). Sem
   `lock_timeout`: nenhuma destas transações faz I/O externo, cada lock dura poucos statements.
+
+## Leads e notificações (TASK-006)
+
+`/api/backoffice/leads` (CRUD) e `/api/backoffice/notifications` (listar, marcar lida, marcar
+todas, apagar), portados do `dcbo-backend`. O `POST /api/leads` público grava o lead **e** a
+notificação `novo_lead` na mesma transação (`LeadService#createFromWebsite` chama
+`NotificationService#createForNewLead`, propagação `REQUIRED`); já não há encaminhamento HTTP para
+lado nenhum. O que não se adivinha pelo código, cada ponto com o teste que o prova:
+
+- **Verbos de paridade**: `PUT /leads/{id}` (não `PATCH`), porque o `updateLead` do `dcbo` envia
+  sempre os 6 campos editáveis (`nome`, `telefone`, `email`, `notas`, `status`, `followUpDate`) e
+  o `PUT` substitui-os todos (`followUpDate` ausente limpa); nunca mexe em carro, snapshot,
+  `mensagem` nem `origem` (`BackOfficeLeadControllerTest#replacesTheSixEditableFieldsAndNothingElse`).
+  `POST /notifications/read-all` (não `PATCH`), 204 (`NotificationControllerTest#readAllIsAPostAndNotAPatch`).
+  `POST /leads` grava `origem = backoffice` e **não** cria notificação (só o lead do site notifica).
+- **`Lead.car` com `updatable = false`**: o carro de um lead fixa-se na criação. Sem isto, uma
+  edição lida antes de o carro ser apagado repunha `car_id` no `UPDATE` de linha inteira e falhava
+  na FK (409, edição perdida) (`service/BackOfficeLeadConcurrencyTest#anEditNeverWritesBackTheCarOfALead`).
+- **`PUT`/`DELETE` leem com `LeadRepository#findByIdForUpdate`**: sem lock, um `PUT`/`DELETE`
+  concorrente com o `DELETE` do mesmo lead tocava 0 linhas no flush, `StaleStateException` sem
+  handler, 500; com o lock o segundo espera e vê 404 (`...ConcurrencyTest#anEditOfALeadBeingDeletedIsA404AndWritesNothing`,
+  `#aSecondDeletionOfTheSameLeadIsA404`). Com este lock, o `ON DELETE SET NULL` de um carro apagado
+  espera pela linha do lead: a edição vê o lead já sem carro
+  (`#anEditOfALeadWhoseCarIsBeingDeletedSavesTheNotesAndEndsWithoutCar`).
+- **Notificações por `@Modifying`** (`NotificationRepository#markAsRead`/`#markAllAsRead`/
+  `#deleteByIdReturningCount`): a contagem de linhas decide o 404. O `dcbo-backend` carregava todas
+  as não lidas e fazia um `UPDATE` por linha (aqui: 20 não lidas = 2 statements,
+  `NotificationControllerTest#marksAllAsReadInOneStatement`), e um `PATCH`/`DELETE` de uma
+  notificação apagada pelo `ON DELETE CASCADE` do lead dava 500
+  (`...ConcurrencyTest#markingAsReadANotificationWhoseLeadIsBeingDeletedIsA404`). Com
+  `clearAutomatically`: o `PATCH` relê a notificação da BD, não do contexto de persistência.
+- **`?status=` por `PropertyEditor`** (`LeadStatusQueryConverter`, mesma razão do `?tipo=` das
+  transações): só os valores da BD em minúsculas; `ATIVO` e `xyz` dão 400, vazio = sem filtro
+  (`BackOfficeLeadControllerTest#theStatusFilterOnlyAcceptsTheStoredLowerCaseValues`).
+- **A mensagem do site fica em `leads.mensagem`**, nunca em `notas` (o `dcbo-backend` punha-a em
+  `notas`): os leads antigos já a têm em `mensagem`, e as `notas` são do pessoal do stand e o `PUT`
+  substitui-as. A resposta tem as duas chaves; o `dcbo` novo (0.3.0) tem de mostrar `mensagem`
+  (`PublicLeadControllerTest#sanitizesAMensagemContainingAScriptTagAndKeepsItInMensagem`).
+- **Mensagem da notificação**: `"Novo lead de <nome>"` + `" sobre <marca> <modelo>"` só com as
+  partes não vazias (o `dcbo-backend` escrevia `"sobre BMW null"` e `"sobre  "` para o
+  `carroMarca: ""` de um contacto geral) (`PublicLeadControllerTest#theNotificationMessageOnlyJoinsTheNonBlankCarParts`).
+- **`followUpDate` em `[0001-01-01, 9999-12-31]`** (`@StorableDate`): o Jackson aceita
+  `-5000-01-01`, que chegava ao `DATE` e voltava como 409.
+- **Rate limit**: o padrão do `RateLimitInterceptor` continua `/api/leads` exato; nenhuma rota do
+  back-office conta (`BackOfficeLeadControllerTest#theBackOfficeRoutesAreNeverRateLimited`, com o
+  controlo positivo no `POST /api/leads` do mesmo IP). Um padrão como `/api/leads/**` ou uma rota
+  do back-office debaixo de `/api/leads` partia isto.
+- Allow-lists de `sort`: `BackOfficeLeadService#SORTABLE_PROPERTIES` e
+  `NotificationService#SORTABLE_PROPERTIES` (as duas entidades têm uma associação `LAZY`).
+  Custo: listar 50 leads com carro ou 50 notificações com lead são no máximo 3 statements.
+- `POST /api/leads` com carro são exatamente 3 statements (`lockKeyShare`, `INSERT` do lead,
+  `INSERT` da notificação) (`PublicLeadControllerTest#aLeadAboutACarCostsExactlyThreeStatements`).

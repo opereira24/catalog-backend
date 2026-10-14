@@ -88,9 +88,9 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 
 	/**
 	 * Confirms every back-office field V2 added to {@code cars} — partner and client associations
-	 * included — plus the two fields only the catalog had ({@code observacoes}, {@code syncedAt})
-	 * survive a real {@code INSERT} and {@code SELECT}: the persistence context is cleared before
-	 * reloading, so nothing is served from Hibernate's first-level cache.
+	 * included — plus the field only the catalog had ({@code observacoes}) survive a real {@code
+	 * INSERT} and {@code SELECT}: the persistence context is cleared before reloading, so nothing is
+	 * served from Hibernate's first-level cache.
 	 *
 	 * @throws AssertionError if any field does not round-trip
 	 */
@@ -101,7 +101,6 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 		entityManager.persist(partner);
 		entityManager.persist(client);
 		OffsetDateTime dataVenda = OffsetDateTime.of(2026, 9, 1, 15, 30, 0, 0, ZoneOffset.UTC);
-		OffsetDateTime syncedAt = OffsetDateTime.of(2026, 8, 1, 9, 0, 0, 0, ZoneOffset.UTC);
 
 		Car saved = carRepository.saveAndFlush(aCar()
 				.transmissao("Automática")
@@ -116,7 +115,6 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 				.dataVenda(dataVenda)
 				.precoVenda(new BigDecimal("24500.00"))
 				.client(client)
-				.syncedAt(syncedAt)
 				.build());
 		entityManager.clear();
 
@@ -136,7 +134,6 @@ class CarRepositoryTest extends AbstractPostgresIntegrationTest {
 		assertThat(reloaded.getPrecoVenda()).isEqualByComparingTo("24500.00");
 		assertThat(reloaded.getClient().getId()).isEqualTo(client.getId());
 		assertThat(reloaded.getClient().getName()).isEqualTo("Ana Compradora");
-		assertThat(reloaded.getSyncedAt()).isAtSameInstantAs(syncedAt);
 	}
 
 	/**

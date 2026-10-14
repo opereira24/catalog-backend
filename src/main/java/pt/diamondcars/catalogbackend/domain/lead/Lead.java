@@ -8,7 +8,6 @@ import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.OffsetDateTime;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -30,13 +29,17 @@ import pt.diamondcars.catalogbackend.domain.support.AbstractAuditableDomainEntit
  * the lead still says which car it was about after the car is gone. They stay in Portuguese by
  * design (ADR-001, layer 2: business attributes, not FKs).
  *
+ * <p>{@link #car} is {@code updatable = false} (TASK-006 AC E.2): the car of a lead is fixed at
+ * creation, and Hibernate writes the whole row on every {@code UPDATE}. Without it, a car deleted
+ * between the read of a lead and the flush of its edit was written back as {@code car_id}, the
+ * {@code UPDATE} failed on {@code leads_car_id_fkey} (409) and the edit was lost; without {@code
+ * car_id} in the {@code UPDATE}, the {@code ON DELETE SET NULL} of the delete stands. Fixed by
+ * {@code BackOfficeLeadConcurrencyTest}.
+ *
  * <p>The {@link #status} builder default ({@link LeadStatus#CONTACTADO}) comes from {@code
  * dcbo-backend} and differs from the database default ({@code 'ativo'}); every production writer
  * sets the status explicitly ({@code LeadService#createFromWebsite} writes {@link
  * LeadStatus#ATIVO}).
- *
- * <p>{@link #forwardedAt}/{@link #forwardAttempts} track the forwarding of this lead to {@code
- * dcbo-backend}, which only exists until that backend is retired.
  */
 @Getter
 @Setter
@@ -64,7 +67,7 @@ public class Lead extends AbstractAuditableDomainEntity {
 	private String notas;
 
 	@ManyToOne(fetch = FetchType.LAZY)
-	@JoinColumn(name = "car_id")
+	@JoinColumn(name = "car_id", updatable = false)
 	private Car car;
 
 	@Column(name = "carro_marca", length = 100)
@@ -86,11 +89,4 @@ public class Lead extends AbstractAuditableDomainEntity {
 	@Builder.Default
 	@Column(name = "origem", nullable = false, length = 100)
 	private LeadOrigin origem = LeadOrigin.WEBSITE;
-
-	@Column(name = "forwarded_at")
-	private OffsetDateTime forwardedAt;
-
-	@Builder.Default
-	@Column(name = "forward_attempts", nullable = false)
-	private int forwardAttempts = 0;
 }

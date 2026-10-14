@@ -116,7 +116,6 @@ class PublicCarControllerTest extends AbstractPostgresIntegrationTest {
 				.dataCompra(LocalDate.of(2026, 7, 15))
 				.dataVenda(OffsetDateTime.parse("2026-09-01T15:30:00Z"))
 				.precoVenda(new BigDecimal("24500.00"))
-				.syncedAt(OffsetDateTime.parse("2026-08-01T09:00:00Z"))
 				.build();
 		car.addImage(CarImage.builder().url("https://img/1.jpg").build());
 		carRepository.saveAndFlush(car);

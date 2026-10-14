@@ -1,8 +1,6 @@
 package pt.diamondcars.catalogbackend.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.anything;
-import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import java.io.IOException;
 import java.net.URI;
@@ -14,16 +12,10 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.test.web.client.ExpectedCount;
-import org.springframework.test.web.client.MockRestServiceServer;
-import org.springframework.web.client.RestClient;
-import pt.diamondcars.catalogbackend.config.LeadForwardingClientConfig;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -39,8 +31,7 @@ import tools.jackson.databind.json.JsonMapper;
  * 401 and only this class notices.
  *
  * <p>Each request carries its own {@code X-Forwarded-For}, so the per-IP rate limit of {@code POST
- * /api/leads} only triggers in the test that wants it. The lead forward to {@code dcbo-backend} is
- * answered by a {@link MockRestServiceServer}: no request leaves the machine.
+ * /api/leads} only triggers in the test that wants it.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class PublicEndpointsHttpTest extends AbstractPostgresIntegrationTest {
@@ -53,19 +44,6 @@ class PublicEndpointsHttpTest extends AbstractPostgresIntegrationTest {
 
 	@LocalServerPort private int port;
 	@Autowired private JsonMapper jsonMapper;
-
-	@Autowired
-	@Qualifier(LeadForwardingClientConfig.BEAN_NAME)
-	private RestClient.Builder leadForwardingRestClientBuilder;
-
-	@BeforeEach
-	void answerLeadForwardsLocally() {
-		MockRestServiceServer.bindTo(leadForwardingRestClientBuilder)
-				.ignoreExpectOrder(true)
-				.build()
-				.expect(ExpectedCount.manyTimes(), anything())
-				.andRespond(withSuccess());
-	}
 
 	@Test
 	void carListIsPublic() throws Exception {
