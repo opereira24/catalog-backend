@@ -1,7 +1,8 @@
 package pt.diamondcars.catalogbackend.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.assertj.core.api.SoftAssertions.assertSoftly;
 
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -52,19 +53,25 @@ class MalformedAuth0AudienceTest {
 			})
 	void malformedAudienceRejectsEveryTokenWarnsOnceAndNeverCallsTheTenant(String audience, CapturedOutput output) {
 		JwtDecoder decoder = new SecurityConfig().jwtDecoder(auth0.issuer(), audience);
+		String token = auth0.token(List.of("admin"));
 
-		assertThatThrownBy(() -> decoder.decode(auth0.token(List.of("admin"))))
-				.isExactlyInstanceOf(BadJwtException.class)
-				.hasMessage(SecurityConfig.INVALID_TOKEN_MESSAGE);
-		assertThat(output.getAll()).doesNotContain("AUTH0_ISSUER_URI invalido").doesNotContain("\tat ");
-		assertThat(output.getAll().lines().filter(line -> line.contains("AUTH0_AUDIENCE invalido")))
-				.singleElement()
-				.satisfies(
-						line ->
-								assertThat(line)
-										.contains("WARN")
-										.contains("AUTH0_AUDIENCE invalido, " + Auth0Issuer.forLog(audience) + ": "));
-		assertThat(auth0.requests()).as("requests of any kind to the tenant").isZero();
+		Throwable rejection = catchThrowable(() -> decoder.decode(token));
+		List<String> warnings = output.getAll().lines().filter(line -> line.contains("AUTH0_AUDIENCE invalido")).toList();
+
+		// Soft: a decoder that lets the value through also rejects the token (another aud), so each
+		// of the three facts is reported on its own.
+		assertSoftly(softly -> {
+			softly.assertThat(warnings).as("AUTH0_AUDIENCE warnings").hasSize(1);
+			softly.assertThat(warnings).allSatisfy(line -> assertThat(line)
+					.contains("WARN")
+					.contains("AUTH0_AUDIENCE invalido, " + Auth0Issuer.forLog(audience) + ": "));
+			softly.assertThat(auth0.requests()).as("requests of any kind to the tenant").isZero();
+			softly.assertThat(rejection)
+					.as("the rejection")
+					.isExactlyInstanceOf(BadJwtException.class)
+					.hasMessage(SecurityConfig.INVALID_TOKEN_MESSAGE);
+			softly.assertThat(output.getAll()).doesNotContain("AUTH0_ISSUER_URI invalido").doesNotContain("\tat ");
+		});
 	}
 
 	/** Control: the same tenant and token with the audience as it should be is accepted, without the warning. */
