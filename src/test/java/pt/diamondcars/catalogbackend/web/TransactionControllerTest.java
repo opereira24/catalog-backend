@@ -15,6 +15,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.assertCreationTimestampsAreTheWrittenOnes;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.assertUpdatedAtIsTheNewlyWrittenOne;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.makeStale;
 
 import jakarta.persistence.EntityManagerFactory;
 import java.math.BigDecimal;
@@ -258,6 +261,49 @@ class TransactionControllerTest extends AbstractPostgresIntegrationTest {
 		Transaction reloaded = transactionRepository.findById(existing.getId()).orElseThrow();
 		assertThat(reloaded.getTipo()).isEqualTo(TransactionType.RECEITA);
 		assertThat(reloaded.getData()).isEqualTo(LocalDate.of(2026, 1, 15));
+	}
+
+	/**
+	 * TASK-020 B.1: the 201 of a {@code POST} carries the {@code createdAt}/{@code updatedAt} written
+	 * to the row ({@code save} without a flush answered both {@code null}).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void createdTransactionCarriesTheWrittenTimestamps() throws Exception {
+		String body = mockMvc
+				.perform(postJson(aRequest()).with(user()))
+				.andExpect(status().isCreated())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+
+		assertCreationTimestampsAreTheWrittenOnes(objectMapper.readTree(body), jdbcTemplate, "transactions");
+	}
+
+	/**
+	 * TASK-020 B.2: the 200 of a {@code PUT} that changes a field carries the new {@code updatedAt},
+	 * not the one the row had before (dirty checking alone flushed only at commit, after the response
+	 * was mapped).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void updatedTransactionCarriesTheNewUpdatedAt() throws Exception {
+		Transaction existing = saved(TransactionType.DESPESA, "50.00", LocalDate.of(2026, 1, 1));
+		makeStale(jdbcTemplate, "transactions", existing.getId());
+
+		String body = mockMvc
+				.perform(put(PATH + "/{id}", existing.getId())
+						.with(user())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(aRequest())))
+				.andExpect(status().isOk())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+
+		assertUpdatedAtIsTheNewlyWrittenOne(objectMapper.readTree(body), jdbcTemplate, "transactions");
 	}
 
 	/**
