@@ -509,7 +509,9 @@ public class BackOfficeCarService {
 	}
 
 	private Partner lockPartner(UUID partnerId) {
-		return partnerRepository.findByIdForUpdate(partnerId).orElseThrow(() -> partnerNotFound(partnerId));
+		return partnerRepository
+				.findByIdForUpdate(partnerId)
+				.orElseThrow(() -> PartnerService.partnerNotFound(partnerId));
 	}
 
 	private Client lockClient(UUID clientId) {
@@ -524,15 +526,13 @@ public class BackOfficeCarService {
 	 * caller-supplied id deserves. No lock: used where the partner's counters do not change.
 	 */
 	private Partner requirePartner(UUID partnerId) {
-		return partnerRepository.findById(partnerId).orElseThrow(() -> partnerNotFound(partnerId));
+		return partnerRepository
+				.findById(partnerId)
+				.orElseThrow(() -> PartnerService.partnerNotFound(partnerId));
 	}
 
 	private static ResourceNotFoundException carNotFound(UUID id) {
 		return new ResourceNotFoundException("Carro nao encontrado: " + id);
-	}
-
-	private static ResourceNotFoundException partnerNotFound(UUID partnerId) {
-		return new ResourceNotFoundException("Parceiro nao encontrado: " + partnerId);
 	}
 
 	private static void decrementPurchases(Client client) {

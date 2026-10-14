@@ -109,7 +109,7 @@ public class PartnerService {
 	public PartnerResponse update(UUID id, PartnerRequest request) {
 		Partner partner = partnerRepository
 				.findByIdForUpdate(id)
-				.orElseThrow(() -> new ResourceNotFoundException("Parceiro nao encontrado: " + id));
+				.orElseThrow(() -> partnerNotFound(id));
 		applyRequest(partner, request);
 		return PartnerResponse.from(partner);
 	}
@@ -136,7 +136,7 @@ public class PartnerService {
 	public void delete(UUID id) {
 		Partner partner = partnerRepository
 				.findByIdForDelete(id)
-				.orElseThrow(() -> new ResourceNotFoundException("Parceiro nao encontrado: " + id));
+				.orElseThrow(() -> partnerNotFound(id));
 		if (carRepository.existsByPartnerId(id)) {
 			throw new ResourceInUseException("Parceiro tem carros de consignacao associados: " + id);
 		}
@@ -214,10 +214,21 @@ public class PartnerService {
 		partner.setTotalCommission(reversed.max(BigDecimal.ZERO));
 	}
 
+	/**
+	 * Builds the partner 404 ({@code Parceiro nao encontrado: <id>}), the only source of that message:
+	 * also used by {@code BackOfficeCarService} when a car operation references an unknown partner.
+	 *
+	 * @param id the partner id that matched no row
+	 * @return the exception to throw, mapped to 404 by {@code ApiExceptionHandler}
+	 */
+	static ResourceNotFoundException partnerNotFound(UUID id) {
+		return new ResourceNotFoundException("Parceiro nao encontrado: " + id);
+	}
+
 	private Partner findOrThrow(UUID id) {
 		return partnerRepository
 				.findById(id)
-				.orElseThrow(() -> new ResourceNotFoundException("Parceiro nao encontrado: " + id));
+				.orElseThrow(() -> partnerNotFound(id));
 	}
 
 	private void applyRequest(Partner partner, PartnerRequest request) {
