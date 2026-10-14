@@ -182,8 +182,9 @@ class AppUserConcurrencyTest extends AbstractPostgresIntegrationTest {
 	/**
 	 * K-U6 (TASK-020 C.1): two concurrent edits of the same profile both succeed and leave one of the
 	 * two edits whole. Proves the strength of {@code AppUserRepository#findByIdForUpdate}, which no
-	 * other test here does: the gates of K-U1, K-U2, K-U3 and K-U5 write the row, which blocks {@code FOR SHARE} as
-	 * much as {@code FOR NO KEY UPDATE}, so those tests also pass with {@code PESSIMISTIC_READ}.
+	 * other test here does: the gates of K-U1, K-U2, K-U3 and K-U5 write the row, which blocks {@code
+	 * FOR SHARE} as much as {@code FOR NO KEY UPDATE}, so those tests also pass with {@code
+	 * PESSIMISTIC_READ}.
 	 *
 	 * <p>Behind a {@code FOR SHARE} gate, with {@code PESSIMISTIC_WRITE} ({@code FOR NO KEY UPDATE})
 	 * both edits wait in the lock's {@code SELECT} and then run one after the other. With {@code
