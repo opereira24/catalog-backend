@@ -16,7 +16,12 @@ back-office. Cada ponto tem um teste que o prova.
   CORS (`/api/**`) já o cobre. Não `/api/admin` (o perfil `USER` também o usa).
 - **Guarda**: `config/BackOfficeSurfaceTest` percorre todos os mapeamentos e exige, para cada rota
   `/api/**` que `PublicEndpoints.MATCHER` não deixa passar sem token, (a) o prefixo
-  `/api/backoffice/` e (b) `@PreAuthorize` no método ou na classe. Nunca importar
+  `/api/backoffice/`, (b) `@PreAuthorize` no método ou na classe e (c) (TASK-007) a expressão
+  **efetiva** (a do método se existir, senão a da classe) igual a `hasRole('ADMIN')` ou
+  `hasAnyRole('ADMIN', 'USER')`, exceto exatamente `GET`/`HEAD /api/backoffice/me`, que tem de ser
+  `isAuthenticated()`. Sem (c), `@PreAuthorize("isAuthenticated()")` em qualquer rota passava (b), e
+  é esse o "só autenticado" que a guarda existe para impedir. Uma role nova (ou outra forma de a
+  escrever) entra em `ROLE_EXPRESSIONS` do teste, de propósito. Nunca importar
   `SecurityProbeConfig` nesse teste: a sonda (`/api/security-probe`) falharia a regra (a).
 - Nomes: o público fica com o nome curto; `BackOffice*` **só** onde há gémeo público
   (`BackOfficeCarController`, `BackOfficeCarService`, `BackOfficeCarSpecifications`,
@@ -392,6 +397,49 @@ Regras (cada uma com o cenário que a prova):
   partilhadas por carros diferentes: K2, K3, K5, K6), `SERIALIZABLE`/`REPEATABLE READ` (obrigam a
   repetir pedidos em `40001`), advisory global de vendas (serializa vendas sem nada em comum). Sem
   `lock_timeout`: nenhuma destas transações faz I/O externo, cada lock dura poucos statements.
+
+## Utilizadores e `/me` (TASK-007)
+
+`/api/backoffice/users` (CRUD + `PATCH /{id}/active`) e `GET /api/backoffice/me`, portados do
+`dcbo-backend` (lá `/api/users` e `/api/me`). Testes: `AppUserControllerTest` (#1 a #27),
+`service/AppUserConcurrencyTest` (K-U1 a K-U5), `AppUserRepositoryTest`.
+
+- **`hasRole('ADMIN')` na classe, `isAuthenticated()` só em `me()`.** O controller está mapeado em
+  `BackOfficeApi.PREFIX` (não em `PREFIX + "/users"`) porque `/me` não vive debaixo de `/users`. Um
+  método novo herda `ADMIN` (seguro por omissão). `me()` não pode ficar sem anotação como no
+  `dcbo-backend`: herdava `ADMIN` e um `USER` (ou um signup sem role) levava 403 no próprio perfil
+  (`#meIsOpenToATokenWithoutARole`, `#meIsOpenToTheUserRole`). É a única rota com
+  `isAuthenticated()`, guardado pela regra (c) do `BackOfficeSurfaceTest` (ver "Prefixo").
+- **A role que autoriza é sempre a do token Auth0, nunca `app_users.role`.** O `Auth0RolesConverter`
+  só lê o claim; `app_users.role` é informativo (o que o `dcbo` mostra). Mudar a role de um perfil
+  por `PUT` não dá nem tira permissões no backend: promover alguém a admin faz-se no Auth0
+  (`#theProfileRoleNeverGrantsAccessOnlyTheTokenRoleDoes`). É também o que deixa o **primeiro admin**
+  trabalhar com a tabela vazia, sem código especial: o `ActiveUserInterceptor` deixa passar quem não
+  tem linha e o token traz `admin` (`#firstAdminCanCreateUsersWithoutALocalProfile`).
+- **`update`/`setActive`/`delete` leem com `AppUserRepository#findByIdForUpdate`** (só o `get` usa
+  `findById`), e é a primeira leitura do perfil no método (armadilha da primeira carga, ver "Vendas,
+  reversões e concorrência"). Porquê, segurança e não estética: o Hibernate grava a linha inteira, por
+  isso um `PUT` de nome lido antes de outro admin desativar o utilizador regravava `active = true` no
+  commit e **a desativação desaparecia em silêncio** (K-U1; K-U5 é o inverso, a desativação a repor o
+  nome antigo). Contra um `DELETE` concorrente, sem lock o `UPDATE`/`DELETE` tocava 0 linhas e dava 500
+  (`StaleStateException`); com ele, 404 (K-U2, K-U3). Ordem em `setActive`/`delete`: lock, verificação
+  de "é o próprio", escrita.
+- **`create` com `saveAndFlush`**: o 201 traz `createdAt`/`updatedAt` gravados. Dois `POST` simultâneos
+  com o mesmo `authSubject` passam os dois o `findByAuthSubject`; o segundo falha no índice único e sai
+  como 409 genérico `Pedido em conflito com o estado atual dos dados` (K-U4), nunca 500. Aceite: sem
+  código para distinguir a constraint.
+- **404 de `/me` com o envelope `ApiError` normal** (`Sem perfil local para o utilizador autenticado`),
+  como todos os erros da API. O `dcbo` lê-o como "conta sem acesso atribuído". Um utilizador desativado
+  recebe 403 `Conta desativada` em `/me` (o interceptor corre antes), não o perfil.
+- **Auto-desativação e auto-eliminação: 409** (`SelfDeactivationException`, `SelfDeletionException`),
+  comparando o `sub` do token com o `authSubject` do perfil. Um admin sem perfil local nunca bate nestas
+  regras. **Último admin**: nada impede um admin de desativar ou apagar outro admin, nem dois de se
+  desativarem um ao outro ao mesmo tempo (paridade; o acesso real vem do token). Um perfil desativado
+  por engano reativa-se por outro admin ou, sem nenhum, com `UPDATE app_users SET active = true` manual.
+- `PATCH .../active` com `{}` ou `{"active": null}` dá 400 `active: ...` (`Boolean` + `@NotNull`, nunca
+  um default que desative). Chaves desconhecidas ignoradas: `active: false` no `POST`, `authSubject`/
+  `email`/`active` no `PUT` não têm efeito.
+- Listagem: `StableSort#withIdTiebreak`, sem allow-list de `sort` (`AppUser` é plana).
 
 ## Leads e notificações (TASK-006)
 

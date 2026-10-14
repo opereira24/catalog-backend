@@ -25,6 +25,7 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 import pt.diamondcars.catalogbackend.web.dto.ApiError;
 import pt.diamondcars.catalogbackend.web.exception.CarAlreadySoldException;
 import pt.diamondcars.catalogbackend.web.exception.CarNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.DuplicateAuthSubjectException;
 import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededException;
 import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
 import pt.diamondcars.catalogbackend.web.exception.InvalidReferenceException;
@@ -33,6 +34,8 @@ import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
 import pt.diamondcars.catalogbackend.web.exception.ResourceInUseException;
 import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.SelfDeactivationException;
+import pt.diamondcars.catalogbackend.web.exception.SelfDeletionException;
 import pt.diamondcars.catalogbackend.web.exception.UnknownSortPropertyException;
 
 /**
@@ -208,6 +211,47 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(ResourceInUseException.class)
 	public ResponseEntity<ApiError> handleResourceInUse(
 			ResourceInUseException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link DuplicateAuthSubjectException} (creating a back-office profile for an {@code
+	 * authSubject} that already has one, TASK-007 AC C.2) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code AppUserService#create}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(DuplicateAuthSubjectException.class)
+	public ResponseEntity<ApiError> handleDuplicateAuthSubject(
+			DuplicateAuthSubjectException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link SelfDeactivationException} (an admin deactivating their own profile, TASK-007 AC
+	 * C.4) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code AppUserService#setActive}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(SelfDeactivationException.class)
+	public ResponseEntity<ApiError> handleSelfDeactivation(
+			SelfDeactivationException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link SelfDeletionException} (an admin deleting their own profile, TASK-007 AC C.5) to 409
+	 * with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code AppUserService#delete}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(SelfDeletionException.class)
+	public ResponseEntity<ApiError> handleSelfDeletion(SelfDeletionException exception, HttpServletRequest request) {
 		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
 	}
 
