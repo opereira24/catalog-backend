@@ -7,7 +7,9 @@ do back-office portados do `dcbo-backend`.
 ## Migrações Flyway (`src/main/resources/db/migration/`)
 
 - **`V1__init.sql` é imutável.** Já foi aplicado no Neon; qualquer edição muda o checksum e o
-  Flyway recusa arrancar. Toda a evolução é por migração nova (`V3`, `V4`, ...).
+  Flyway recusa arrancar. Toda a evolução é por migração nova (`V3`, `V4`, ...). O mesmo vale
+  para cada migração depois de mergeada (os comentários antigos da V2 sobre o encaminhamento
+  ficam: mudá-los mudava o checksum).
 - **`V2__unified_back_office_schema.sql` é o modelo unificado**: cria `partners`, `clients`,
   `transactions`, `notifications`, `app_users` (iguais ao `dcbo-backend`) e acrescenta a
   `cars`, `car_images` e `leads` as colunas do back-office. Um carro e um lead são **uma**
@@ -22,7 +24,21 @@ do back-office portados do `dcbo-backend`.
   deploy cair (medido com dois `psql` em paralelo, TASK-001).
 - `V1ToV2UpgradeTest` prova o upgrade sobre dados V1 numa schema própria (`upgrade_v1_v2`) com
   `target("2")`. Uma migração nova que mexa em dados existentes merece um teste do mesmo tipo
-  (migrar até à versão anterior, inserir por SQL, migrar, comparar).
+  (migrar até à versão anterior, inserir por SQL, migrar, comparar). `V2ToV3UpgradeTest` compara
+  todas as colunas que sobrevivem, com a lista lida de `information_schema.columns` antes da
+  migração (não precisa de manutenção quando o esquema cresce).
+- **Migração que altere tabelas existentes: 1.ª linha `SET LOCAL lock_timeout = '10s';`, depois
+  um único `LOCK TABLE` com as tabelas por ordem `cars`, `leads` (a da aplicação), antes de
+  qualquer `ALTER`.** Provado por `migration/V3LockTest` (TASK-006). Porquê: o deploy no Render é
+  sem interrupção e a instância antiga continua a ler e escrever enquanto a nova corre o Flyway.
+  Sem `lock_timeout`, uma transação aberta da instância antiga prende a migração sem limite e
+  todas as leituras dessas tabelas ficam em fila atrás do `ACCESS EXCLUSIVE` dela; com ele, a
+  migração falha ao fim de 10 s com `55P03`, a BD fica na versão anterior e o deploy repete-se.
+  `SET LOCAL`, nunca `SET` (não fica numa ligação do pool). A ordem: `POST /api/leads` tranca o
+  carro (`FOR KEY SHARE`) e depois insere em `leads`; com `leads` primeiro dá `deadlock detected`
+  (medido: no teste a vítima é a migração, que esperava há mais tempo; o arquiteto mediu-o com o
+  `INSERT` do lead como vítima). Tabela nova na lista: pô-la na posição em que a aplicação a
+  tranca.
 
 ## Factos do esquema que não se adivinham pelo código
 
@@ -45,8 +61,11 @@ do back-office portados do `dcbo-backend`.
 - **`car_images.created_at` das fotos anteriores à V2 é o `created_at` do carro** (a data real
   da foto não existe).
 - **`observacoes` é público**: está no `CarResponse` e o `dc` mostra-o na página do carro.
-  `synced_at`, `forwarded_at` e `forward_attempts` não são públicos e saem na migração de
-  limpeza do encaminhamento para o `dcbo-backend`.
+  `synced_at`, `forwarded_at` e `forward_attempts` saíram na V3 (TASK-006), com o encaminhamento
+  para o `dcbo-backend`; os leads nunca encaminhados ficaram como leads normais.
+- **`Lead.car` é `updatable = false`**: o carro de um lead fixa-se na criação. O Hibernate grava a
+  linha inteira, e sem isto uma edição podia repor o `car_id` de um carro já apagado (FK, 409).
+  Prova em `service/BackOfficeLeadConcurrencyTest#anEditNeverWritesBackTheCarOfALead`.
 - **Contrato público congelado**: cada carro de `GET /api/cars`, `/api/cars/{id}` e
   `/api/cars/highlights` tem exatamente 18 chaves (`PublicCarControllerTest#PUBLIC_CAR_KEYS`).
   Um campo novo na entidade nunca aparece no site por acaso; acrescentar uma chave é uma decisão
@@ -71,5 +90,5 @@ do back-office portados do `dcbo-backend`.
   sempre `id` como desempate (`CarQueryService#DEFAULT_SORT`,
   `findByDestaqueTrueAndVendidoFalseOrderByCreatedAtDescIdAsc`).
 - Associações `@ManyToOne` sempre `LAZY`. `lead.getCar().getId()` fora de transação é seguro
-  (o Hibernate responde ao id do proxy sem o carregar, `LeadForwardPayload#from`); qualquer
+  (o Hibernate responde ao id do proxy sem o carregar, `BackOfficeLeadResponse#from`); qualquer
   outro getter do carro fora de transação dá `LazyInitializationException`.
