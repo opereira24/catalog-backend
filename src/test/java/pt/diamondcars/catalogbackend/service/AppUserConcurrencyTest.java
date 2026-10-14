@@ -26,13 +26,15 @@ import pt.diamondcars.catalogbackend.domain.user.AppUser;
 import pt.diamondcars.catalogbackend.domain.user.AppUserRepository;
 import pt.diamondcars.catalogbackend.domain.user.AppUserRole;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
+import pt.diamondcars.catalogbackend.web.dto.AppUserActiveRequest;
 import pt.diamondcars.catalogbackend.web.dto.AppUserRequest;
 import pt.diamondcars.catalogbackend.web.dto.AppUserUpdateRequest;
 import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
 
 /**
  * Proves, deterministically and against real PostgreSQL, the concurrency rules of the profile
- * writes (TASK-007, AC C.6 and the ASSUMPTION of C.2; K-U1 to K-U4 of AC F.3). Technique of {@code
+ * writes (TASK-007, AC C.6 and the ASSUMPTION of C.2; K-U1 to K-U4 of AC F.3, plus K-U5 for {@code
+ * setActive}). Technique of {@code
  * web/CLAUDE.md} ("Testar corridas", K8 variant): the gate is a separate connection that wrote the
  * profile's row without committing; the service call runs in a thread, the test waits until {@code
  * pg_stat_activity} shows it waiting on a lock, commits the gate and asserts the outcome.
@@ -81,6 +83,26 @@ class AppUserConcurrencyTest extends AbstractPostgresIntegrationTest {
 				.containsEntry("active", false)
 				.containsEntry("name", "Nome Novo")
 				.containsEntry("role", "admin");
+	}
+
+	/**
+	 * K-U5 (beyond AC F.3, which has no race for {@code setActive}): the mirror of K-U1, a
+	 * deactivation concurrent with another admin's name edit keeps the edit. Without the lock in
+	 * {@code setActive} the deactivation read the old name and wrote it back.
+	 *
+	 * @throws Exception from the gate connection or the worker
+	 */
+	@Test
+	void anEditIsNeverUndoneByAConcurrentDeactivation() throws Exception {
+		AppUser user = aProfile();
+
+		Throwable outcome = whileUncommitted("UPDATE app_users SET name = 'Nome Novo' WHERE id = ?", user.getId(),
+				() -> appUserService.setActive(user.getId(), new AppUserActiveRequest(false)));
+
+		assertThat(outcome).isNull();
+		assertThat(jdbcTemplate.queryForMap("SELECT active, name FROM app_users WHERE id = ?", user.getId()))
+				.containsEntry("active", false)
+				.containsEntry("name", "Nome Novo");
 	}
 
 	/**
