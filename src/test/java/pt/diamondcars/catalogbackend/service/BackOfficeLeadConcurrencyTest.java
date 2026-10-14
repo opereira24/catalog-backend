@@ -5,9 +5,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -15,6 +18,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,13 +42,15 @@ import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
 
 /**
  * Proves, deterministically and against real PostgreSQL, the concurrency rules of the back-office
- * lead and notification writes (TASK-006, AC E.2, E.3, E.5). Technique of {@code web/CLAUDE.md}
- * ("Testar corridas", K8 variant): the gate is a separate connection that deleted a row without
- * committing; the request runs in a thread against the service, the test waits until {@code
- * pg_stat_activity} shows it waiting on a lock, commits the gate, and asserts the outcome.
+ * lead and notification writes (TASK-006, AC E.2, E.3, E.5; TASK-020 C.2 for the strength of the
+ * lock). Technique of {@code web/CLAUDE.md} ("Testar corridas", K8 variant): the gate is a separate
+ * connection that deleted a row without committing (C.2: that took {@code FOR SHARE} on it); the
+ * requests run in threads against the service, the test waits until {@code pg_stat_activity} shows
+ * all of them waiting on a lock, commits the gate, and asserts the outcome.
  *
  * <p>Shares the cached context of the other plain {@code @SpringBootTest} classes ({@code
- * PartnerDeleteConcurrencyTest}): one worker, the gate and the polling query fit the default pool.
+ * PartnerDeleteConcurrencyTest}): two workers at most, the gate and the polling query (4 connections)
+ * fit the default pool.
  */
 @SpringBootTest
 class BackOfficeLeadConcurrencyTest extends AbstractPostgresIntegrationTest {
@@ -200,34 +206,102 @@ class BackOfficeLeadConcurrencyTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
+	 * TASK-020 C.2: two concurrent edits of the same lead both succeed and leave one of the two notes.
+	 * Proves the strength of {@code LeadRepository#findByIdForUpdate}, which no other test here does:
+	 * the gates of the other lead races write the lead's row (directly, or through the car's {@code ON
+	 * DELETE SET NULL}), which blocks {@code FOR SHARE} as much as {@code FOR NO KEY UPDATE}.
+	 *
+	 * <p>Behind a {@code FOR SHARE} gate, with {@code PESSIMISTIC_WRITE} ({@code FOR NO KEY UPDATE})
+	 * both edits wait in the lock's {@code SELECT} and then run one after the other. With {@code
+	 * PESSIMISTIC_READ} (mutant X1-lead) both take the shared lock, both wait in their {@code UPDATE},
+	 * and once the gate commits each waits for the other: one fails with {@code
+	 * CannotAcquireLockException} ({@code deadlock detected}, 40P01), a 500 for the caller. One worker
+	 * is not enough: the gate's {@code FOR SHARE} also blocks the mutant's {@code UPDATE}.
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void twoConcurrentEditsOfTheSameLeadBothSucceed() throws Exception {
+		Lead lead = aLead(null);
+
+		List<Throwable> outcomes = whileShareLocked("leads", lead.getId(),
+				() -> leadService.update(lead.getId(), anEdit("Notas Um")),
+				() -> leadService.update(lead.getId(), anEdit("Notas Dois")));
+
+		assertThat(outcomes).containsOnlyNulls();
+		assertThat(jdbcTemplate.queryForObject("SELECT notas FROM leads WHERE id = ?", String.class, lead.getId()))
+				.isIn("Notas Um", "Notas Dois");
+	}
+
+	/**
 	 * Runs {@code sql} with {@code id} on a separate connection without committing, starts {@code
 	 * worker} in a thread, waits until it waits on a lock, commits, and returns the worker's outcome.
 	 *
 	 * @return {@code null} if the worker succeeded, or the exception it threw
 	 */
 	private Throwable whileUncommitted(String sql, UUID id, Callable<?> worker) throws Exception {
-		ExecutorService pool = Executors.newSingleThreadExecutor();
+		return behindGate(gate -> {
+			try (PreparedStatement statement = gate.prepareStatement(sql)) {
+				statement.setObject(1, id);
+				assertThat(statement.executeUpdate()).isEqualTo(1);
+			}
+		}, worker).getFirst();
+	}
+
+	/**
+	 * Takes {@code FOR SHARE} on the row {@code id} of {@code table} on a separate connection, starts
+	 * every worker in its own thread, waits until all of them wait on a lock, commits, and returns
+	 * their outcomes. The gate is a query: {@code FOR SHARE} writes nothing.
+	 *
+	 * @return per worker, in order, {@code null} if it succeeded or the exception it threw
+	 */
+	private List<Throwable> whileShareLocked(String table, UUID id, Callable<?>... workers) throws Exception {
+		return behindGate(gate -> {
+			try (PreparedStatement statement =
+					gate.prepareStatement("SELECT 1 FROM " + table + " WHERE id = ? FOR SHARE")) {
+				statement.setObject(1, id);
+				try (ResultSet locked = statement.executeQuery()) {
+					assertThat(locked.next()).as("row %s of %s", id, table).isTrue();
+				}
+			}
+		}, workers);
+	}
+
+	/**
+	 * Opens the gate (a statement left uncommitted on its own connection), starts the workers, waits
+	 * until all of them wait on a lock, commits the gate, and collects the outcomes. A worker that does
+	 * not answer within 30 s fails the test ({@code TimeoutException}), never counts as a success.
+	 */
+	private List<Throwable> behindGate(GateStatement gateStatement, Callable<?>... workers) throws Exception {
+		ExecutorService pool = Executors.newFixedThreadPool(workers.length);
 		try (Connection gate = dataSource.getConnection()) {
 			gate.setAutoCommit(false);
-			Future<?> task;
+			List<Future<?>> tasks = new ArrayList<>();
 			try {
-				try (PreparedStatement statement = gate.prepareStatement(sql)) {
-					statement.setObject(1, id);
-					assertThat(statement.executeUpdate()).isEqualTo(1);
+				gateStatement.runOn(gate);
+				for (Callable<?> worker : workers) {
+					tasks.add(pool.submit(worker));
 				}
-				task = pool.submit(worker);
-				awaitOneSessionWaitingOnALock(task);
+				awaitSessionsWaitingOnALock(workers.length, tasks);
 			} finally {
 				gate.commit();
 			}
-			try {
-				task.get(30, TimeUnit.SECONDS);
-				return null;
-			} catch (ExecutionException failed) {
-				return failed.getCause();
+			List<Throwable> outcomes = new ArrayList<>();
+			for (Future<?> task : tasks) {
+				outcomes.add(outcomeOf(task));
 			}
+			return outcomes;
 		} finally {
 			pool.shutdownNow();
+		}
+	}
+
+	private static Throwable outcomeOf(Future<?> task) throws InterruptedException, TimeoutException {
+		try {
+			task.get(30, TimeUnit.SECONDS);
+			return null;
+		} catch (ExecutionException failed) {
+			return failed.getCause();
 		}
 	}
 
@@ -244,23 +318,29 @@ class BackOfficeLeadConcurrencyTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * Polls {@code pg_stat_activity} until one session waits on a lock. Fails fast if the worker
-	 * finished first: it did not wait for the gate, so the test would not prove the race.
+	 * Polls {@code pg_stat_activity} until {@code expected} sessions wait on a lock. Fails fast if a
+	 * worker finished first: it did not wait for the gate, so the test would not prove the race.
 	 */
-	private void awaitOneSessionWaitingOnALock(Future<?> worker) throws InterruptedException {
+	private void awaitSessionsWaitingOnALock(int expected, List<Future<?>> workers) throws InterruptedException {
 		Instant deadline = Instant.now().plus(WAITING_DEADLINE);
 		while (Instant.now().isBefore(deadline)) {
-			assertThat(worker.isDone()).as("the worker finished without waiting for the gate").isFalse();
+			assertThat(workers).as("a worker finished without waiting for the gate").noneMatch(Future::isDone);
 			Integer waiting = jdbcTemplate.queryForObject(
 					"SELECT count(*)::int FROM pg_stat_activity WHERE datname = current_database()"
 							+ " AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'",
 					Integer.class);
-			if (waiting != null && waiting == 1) {
+			if (waiting != null && waiting == expected) {
 				return;
 			}
 			Thread.sleep(20);
 		}
-		throw new AssertionError("The worker never waited on a lock");
+		throw new AssertionError("Never saw " + expected + " session(s) waiting on a lock");
+	}
+
+	/** The statement that opens a gate, run on the gate's connection before any worker starts. */
+	@FunctionalInterface
+	private interface GateStatement {
+		void runOn(Connection gate) throws SQLException;
 	}
 
 	private Lead aLead(Car car) {

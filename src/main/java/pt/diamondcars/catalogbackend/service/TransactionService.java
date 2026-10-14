@@ -137,6 +137,10 @@ public class TransactionService {
 	 * dcbo/src/services/firebaseService.js:380}): never system-generated, never with a client or a
 	 * partner, whatever the body carries.
 	 *
+	 * <p>{@code saveAndFlush}, not {@code save}: the {@code INSERT} runs inside this method, so the
+	 * response carries the {@code createdAt}/{@code updatedAt} that were written ({@code save} left
+	 * both {@code null}; TASK-020).
+	 *
 	 * @param request the validated payload
 	 * @return the created transaction
 	 * @throws InvalidReferenceException if {@code carroId} is given and no car has it (mapped to 400)
@@ -147,7 +151,7 @@ public class TransactionService {
 		applyBusinessFields(transaction, request);
 		transaction.setCar(request.carroId() != null ? requireCar(request.carroId()) : null);
 		transaction.setSystemGenerated(false);
-		return TransactionResponse.from(transactionRepository.save(transaction));
+		return TransactionResponse.from(transactionRepository.saveAndFlush(transaction));
 	}
 
 	/**
@@ -155,6 +159,10 @@ public class TransactionService {
 	 * descricao}, {@code categoria}, {@code data}). Never touches the car, the client, the partner or
 	 * {@code systemGenerated}, also for system-generated transactions (the "Editar" of {@code dcbo}
 	 * opens every one of them; see {@link TransactionRequest} for why {@code carroId} is ignored).
+	 *
+	 * <p>{@code saveAndFlush}, not dirty checking alone: the {@code UPDATE} runs inside this method, so
+	 * the response carries the {@code updatedAt} that was written (without it, the previous one;
+	 * TASK-020). A payload that changes nothing writes nothing and keeps the previous value.
 	 *
 	 * @param id the transaction's id
 	 * @param request the validated payload
@@ -165,7 +173,7 @@ public class TransactionService {
 	public TransactionResponse update(UUID id, TransactionRequest request) {
 		Transaction transaction = findOrThrow(id);
 		applyBusinessFields(transaction, request);
-		return TransactionResponse.from(transaction);
+		return TransactionResponse.from(transactionRepository.saveAndFlush(transaction));
 	}
 
 	/**

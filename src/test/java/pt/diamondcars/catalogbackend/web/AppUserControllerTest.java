@@ -10,6 +10,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.assertUpdatedAtIsTheNewlyWrittenOne;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.makeStale;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -232,6 +234,50 @@ class AppUserControllerTest extends AbstractPostgresIntegrationTest {
 		AppUser updated = appUserRepository.findById(user.getId()).orElseThrow();
 		assertThat(updated.getName()).isEqualTo("Nome Atualizado");
 		assertThat(updated.getRole()).isEqualTo(AppUserRole.ADMIN);
+	}
+
+	/**
+	 * TASK-020 B.2: the 200 of a {@code PUT} with a new name carries the new {@code updatedAt}, not the
+	 * one the profile had before (dirty checking alone flushed only at commit, after the response was
+	 * mapped).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void updatedUserCarriesTheNewUpdatedAt() throws Exception {
+		AppUser user = aProfile("auth0|stale-update", AppUserRole.USER, true);
+		makeStale(jdbcTemplate, "app_users", user.getId());
+
+		String body = mockMvc.perform(json(put(USERS + "/" + user.getId()), "{\"name\":\"Nome Novo\",\"role\":\"user\"}")
+						.with(admin()))
+				.andExpect(status().isOk())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+
+		assertUpdatedAtIsTheNewlyWrittenOne(objectMapper.readTree(body), jdbcTemplate, "app_users");
+	}
+
+	/**
+	 * TASK-020 B.2: the 200 of a {@code PATCH .../active} that deactivates another admin's active
+	 * profile carries the new {@code updatedAt}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void activationChangeCarriesTheNewUpdatedAt() throws Exception {
+		AppUser user = aProfile("auth0|stale-active", AppUserRole.USER, true);
+		makeStale(jdbcTemplate, "app_users", user.getId());
+
+		String body = mockMvc.perform(json(patch(USERS + "/" + user.getId() + "/active"), "{\"active\":false}")
+						.with(admin()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.active").value(false))
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+
+		assertUpdatedAtIsTheNewlyWrittenOne(objectMapper.readTree(body), jdbcTemplate, "app_users");
 	}
 
 	/**

@@ -12,6 +12,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.assertCreationTimestampsAreTheWrittenOnes;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.assertUpdatedAtIsTheNewlyWrittenOne;
+import static pt.diamondcars.catalogbackend.support.WrittenTimestamps.makeStale;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
@@ -221,6 +224,55 @@ class ClientControllerTest extends AbstractPostgresIntegrationTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.name").value("Cliente Teste"))
 				.andExpect(jsonPath("$.phone").value("912345678"));
+	}
+
+	/**
+	 * TASK-020 B.1: the 201 of a {@code POST} carries the {@code createdAt}/{@code updatedAt} written
+	 * to the row ({@code save} without a flush answered both {@code null}).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void createdClientCarriesTheWrittenTimestamps() throws Exception {
+		String body = mockMvc
+				.perform(
+						post(PATH)
+								.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE)))
+								.contentType(MediaType.APPLICATION_JSON)
+								.content(objectMapper.writeValueAsString(validClientRequest())))
+				.andExpect(status().isCreated())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+
+		assertCreationTimestampsAreTheWrittenOnes(objectMapper.readTree(body), jdbcTemplate, "clients");
+	}
+
+	/**
+	 * TASK-020 B.2: the 200 of a {@code PUT} that changes a field carries the new {@code updatedAt},
+	 * not the one the row had before (dirty checking alone flushed only at commit, after the response
+	 * was mapped).
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void updatedClientCarriesTheNewUpdatedAt() throws Exception {
+		Client client =
+				clientRepository.saveAndFlush(Client.builder().name("Antigo").phone("911111111").build());
+		makeStale(jdbcTemplate, "clients", client.getId());
+
+		String body = mockMvc
+				.perform(
+						put(PATH + "/{id}", client.getId())
+								.with(jwt().authorities(new SimpleGrantedAuthority(USER_ROLE)))
+								.contentType(MediaType.APPLICATION_JSON)
+								.content(objectMapper.writeValueAsString(validClientRequest())))
+				.andExpect(status().isOk())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+
+		assertUpdatedAtIsTheNewlyWrittenOne(objectMapper.readTree(body), jdbcTemplate, "clients");
 	}
 
 	/**
