@@ -176,6 +176,20 @@ public final class FakeAuth0 implements AutoCloseable {
 	 * @return the compact JWT
 	 */
 	public String token(RSAKey key, Consumer<JWTClaimsSet.Builder> customizer) {
+		return token(key, JOSEObjectType.JWT, customizer);
+	}
+
+	/**
+	 * As {@link #token(RSAKey, Consumer)}, with {@code type} as the {@code typ} header instead of
+	 * {@code JWT} (what Auth0 emits with the default token profile). {@code at+jwt} is what the
+	 * "RFC 9068" token profile of an Auth0 API emits.
+	 *
+	 * @param key the signing key
+	 * @param type the {@code typ} header
+	 * @param customizer changes the claims
+	 * @return the compact JWT
+	 */
+	public String token(RSAKey key, JOSEObjectType type, Consumer<JWTClaimsSet.Builder> customizer) {
 		Instant now = Instant.now();
 		JWTClaimsSet.Builder claims =
 				new JWTClaimsSet.Builder()
@@ -188,7 +202,7 @@ public final class FakeAuth0 implements AutoCloseable {
 		try {
 			SignedJWT jwt =
 					new SignedJWT(
-							new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).type(JOSEObjectType.JWT).build(),
+							new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).type(type).build(),
 							claims.build());
 			jwt.sign(new RSASSASigner(key));
 			return jwt.serialize();

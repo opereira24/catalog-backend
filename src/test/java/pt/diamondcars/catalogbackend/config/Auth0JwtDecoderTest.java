@@ -3,6 +3,7 @@ package pt.diamondcars.catalogbackend.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.MACSigner;
@@ -38,7 +39,11 @@ import pt.diamondcars.catalogbackend.config.support.TestJwtSupport;
  * be a {@link BadJwtException} (401), never a 2xx and never a server error.
  *
  * <p>Mutants this class kills (measured): deleting {@code decoder.setJwtValidator(...)} (the
- * decoder then only checks the time), and validating the issuer without the audience.
+ * decoder then only checks the time), and validating the issuer without the audience. Also
+ * (TASK-008, B.4): replacing {@code JwtValidators.createDefaultWithIssuer(issuerUri)} with an
+ * issuer and a timestamp validator only accepts the {@code at+jwt} token of the RFC 9068 profile,
+ * and only that case turns red: the {@code typ} check lives in that default validator set, not in
+ * the Nimbus processor.
  */
 class Auth0JwtDecoderTest {
 
@@ -98,6 +103,7 @@ class Auth0JwtDecoderTest {
 				Arguments.of("not before in the future", (TokenFactory) a -> a.token(a.signingKey(), c -> c.notBeforeTime(Date.from(Instant.now().plus(Duration.ofMinutes(10)))))),
 				Arguments.of("another key with the same kid", (TokenFactory) a -> a.token(sameKidOtherKey, c -> {})),
 				Arguments.of("unknown kid", (TokenFactory) a -> a.token(unknownKey, c -> {})),
+				Arguments.of("typ at+jwt (perfil RFC 9068 do Auth0)", (TokenFactory) a -> a.token(a.signingKey(), new JOSEObjectType("at+jwt"), c -> c.claim(TestJwtSupport.ROLES_CLAIM, List.of("admin")))),
 				Arguments.of("alg none", (TokenFactory) a -> new PlainJWT(validClaims(a)).serialize()),
 				Arguments.of("HS256 with the public key as secret", (TokenFactory) Auth0JwtDecoderTest::hmacWithThePublicKey),
 				Arguments.of("payload changed after signing", (TokenFactory) Auth0JwtDecoderTest::tamperedPayload),
