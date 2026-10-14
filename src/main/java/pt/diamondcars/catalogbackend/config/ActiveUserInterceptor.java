@@ -19,8 +19,11 @@ import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
  *
  * <p>Inert on the public endpoints and the actuator: the token is ignored there ({@link
  * SecurityConfig}), so there is no authenticated subject and no query. A subject with no row in
- * {@code app_users} is let through on purpose: the table starts empty and the first admin is
- * created later (TASK-007); only {@code active = false} rejects. Cost: one lookup by the unique
+ * {@code app_users} is let through on purpose: the table starts empty, and the first admin, with
+ * only the {@code admin} role of the token, creates the profiles through {@code
+ * service/AppUserService} ({@code POST /api/backoffice/users}); only {@code active = false} rejects.
+ * {@code GET /api/backoffice/me} goes through here too: a deactivated user gets 403, not their
+ * profile. Cost: one lookup by the unique
  * index {@code idx_app_users_auth_subject} per authenticated request.
  */
 @Component
