@@ -30,6 +30,7 @@ import pt.diamondcars.catalogbackend.domain.transaction.TransactionRepository;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
 import pt.diamondcars.catalogbackend.web.dto.CarRequest;
 import pt.diamondcars.catalogbackend.web.exception.ResourceInUseException;
+import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
 
 /**
  * Proves, deterministically and against real PostgreSQL, the {@code FOR UPDATE} lock of {@code
@@ -44,11 +45,12 @@ import pt.diamondcars.catalogbackend.web.exception.ResourceInUseException;
  * two run in an arbitrary order.
  *
  * <ul>
- *   <li>The deletion decides first (K-PD1, K-PD3): the gate is {@code LOCK TABLE partners IN SHARE
- *       MODE} only. The deletion's {@code SELECT ... FOR UPDATE} takes {@code ROW SHARE} and passes,
- *       its car check passes, and its {@code DELETE} waits on the gate. The writer then reaches its
- *       foreign key check ({@code FOR KEY SHARE} on the partner), which has to wait on the deletion's
- *       row lock.
+ *   <li>The deletion decides first (K-PD1, K-PD3, K-PD4): the gate is {@code LOCK TABLE partners IN
+ *       SHARE MODE} only. The deletion's {@code SELECT ... FOR UPDATE} takes {@code ROW SHARE} and
+ *       passes, its car check passes, and its {@code DELETE} waits on the gate. The writer then waits
+ *       on the deletion's row lock: at its foreign key check ({@code FOR KEY SHARE} on the partner,
+ *       K-PD1, K-PD3) or, in the {@code PUT} of a sold car, earlier, at the partner's {@code FOR NO
+ *       KEY UPDATE} (K-PD4).
  *   <li>The car is saved first (K-PD2): a separate connection runs the {@code UPDATE} the {@code PUT}
  *       runs and does not commit, as K8 of {@link CarSaleConcurrencyTest}; the service commits right
  *       after its flush, with no point to stop at between the foreign key check and the commit.
@@ -160,6 +162,37 @@ class PartnerDeleteConcurrencyTest extends AbstractPostgresIntegrationTest {
 		assertThat(partnerRepository.existsById(partner.getId())).isFalse();
 		assertThat(carRepository.count()).isZero();
 		assertThat(outcomes.waitingBeforeTheGateOpened()).as("deletion and POST both waiting on a lock").isEqualTo(2);
+	}
+
+	/**
+	 * K-PD4: the deletion of partner P has locked P and found no car when a {@code PUT} puts sold car
+	 * C (model A4, no partner) in consignment with P and model A6. A sold car's {@code PUT} locks P
+	 * ({@code FOR NO KEY UPDATE}) before writing anything, so it waits on the deletion's lock and,
+	 * once the deletion commits, re-reads P in {@code READ COMMITTED} and finds it gone: 404, P is
+	 * gone, C keeps no partner, model A4 and stays sold (with a plain read instead of the lock: the
+	 * {@code PUT} reads P before the deletion commits, reaches its foreign key check and fails with
+	 * 409 as in K-PD1).
+	 *
+	 * @throws Exception from the gate connection or the workers
+	 */
+	@Test
+	void kpd4TheDeletionDecidesFirstAndTheConcurrentPutOfASoldCarWithThatPartnerGets404() throws Exception {
+		Partner partner = aPartner();
+		Car car = carRepository.saveAndFlush(aCar().vendido(true).build());
+
+		Outcomes outcomes = deletionDecidingFirst(partner, () -> carService.update(car.getId(), aConsignmentEdit(partner, "A6")));
+
+		assertThat(outcomes.deletion()).as("deletion outcome").isNull();
+		assertThat(outcomes.writer())
+				.as("PUT outcome")
+				.isInstanceOf(ResourceNotFoundException.class)
+				.hasMessage("Parceiro nao encontrado: " + partner.getId());
+		assertThat(partnerRepository.existsById(partner.getId())).isFalse();
+		Car reloaded = carRepository.findById(car.getId()).orElseThrow();
+		assertThat(reloaded.getPartner()).isNull();
+		assertThat(reloaded.getModelo()).isEqualTo("A4");
+		assertThat(reloaded.isVendido()).isTrue();
+		assertThat(outcomes.waitingBeforeTheGateOpened()).as("deletion and PUT both waiting on a lock").isEqualTo(2);
 	}
 
 	/**

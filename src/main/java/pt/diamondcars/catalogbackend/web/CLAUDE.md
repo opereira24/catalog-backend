@@ -224,16 +224,28 @@ antes do `existsByClientId`.
 `partner_id = P` (`INSERT` do `POST`, `UPDATE` do `PUT`) pede `FOR KEY SHARE` a P (verificação de
 FK) até ao commit, e dos modos de lock de linha só `FOR UPDATE` conflita com ele. Com o lock à
 cabeça, ou o carro grava primeiro e o `delete` espera pelo commit e vê-o no `EXISTS` (409
-`ResourceInUseException`), ou o `delete` tranca primeiro e o carro espera e falha a FK quando o
-`delete` faz commit: o `POST`/`PUT` que perde recebe 409 `Pedido em conflito com o estado atual dos
-dados` (`ApiExceptionHandler#handleDataIntegrityViolation`, `ApiExceptionHandlerTest`), nada gravado;
-um pedido novo dá o 404 normal de parceiro inexistente. Sem lock, com `FOR NO KEY UPDATE`, ou com o
-`EXISTS` antes do lock, as duas operações têm sucesso e o `ON DELETE SET NULL` tira o parceiro ao
-carro acabado de gravar. Provado por `service/PartnerDeleteConcurrencyTest`: K-PD1 (`delete` decide
-primeiro, `PUT` concorrente), K-PD2 (carro gravado sem commit, `delete` concorrente; o único que
-apanha o `EXISTS` antes do lock), K-PD3 (`delete` decide primeiro, `POST` concorrente). Não é o lock
-geral do parceiro: bloqueia também as verificações de FK de quem só referencia P (vendas,
-transações); os contadores continuam com `findByIdForUpdate`.
+`ResourceInUseException`), ou o `delete` tranca primeiro e o pedido que perde espera, com resposta
+diferente consoante o caminho:
+
+- `POST`, ou `PUT` de carro não vendido: o carro espera na FK do `saveAndFlush`
+  (`FOR KEY SHARE`) e falha quando o `delete` faz commit: 409 `Pedido em conflito com o estado
+  atual dos dados` (`ApiExceptionHandler#handleDataIntegrityViolation`, `ApiExceptionHandlerTest`),
+  nada gravado.
+- `PUT` de carro vendido: `BackOfficeCarService#update` tranca o parceiro (`lockPartners`,
+  `FOR NO KEY UPDATE`) antes de escrever; esse lock espera pelo `FOR UPDATE` do `delete` e, depois
+  do commit, o PostgreSQL em `READ COMMITTED` re-avalia a linha, encontra-a apagada e não a
+  devolve: 404 `Parceiro nao encontrado: <id>`, carro intacto (o `PUT` nunca chega ao
+  `saveAndFlush`, nem a reconciliação de comissão corre).
+
+Um pedido novo dá o 404 normal de parceiro inexistente. Sem lock no `delete`, com
+`FOR NO KEY UPDATE` no `delete`, ou com o `EXISTS` antes do lock, as duas operações têm sucesso e
+o `ON DELETE SET NULL` tira o parceiro ao carro acabado de gravar. Provado por
+`service/PartnerDeleteConcurrencyTest`: K-PD1 (`delete` decide primeiro, `PUT` concorrente), K-PD2
+(carro gravado sem commit, `delete` concorrente; o único que apanha o `EXISTS` antes do lock),
+K-PD3 (`delete` decide primeiro, `POST` concorrente), K-PD4 (`delete` decide primeiro, `PUT`
+concorrente de carro vendido: 404). Não é o lock geral do parceiro: bloqueia também as
+verificações de FK de quem só referencia P (vendas, transações); os contadores continuam com
+`findByIdForUpdate`.
 
 ## Transações e finanças (TASK-005)
 
