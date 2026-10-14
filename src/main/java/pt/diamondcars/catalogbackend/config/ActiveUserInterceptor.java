@@ -23,8 +23,8 @@ import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
  * only the {@code admin} role of the token, creates the profiles through {@code
  * service/AppUserService} ({@code POST /api/backoffice/users}); only {@code active = false} rejects.
  * {@code GET /api/backoffice/me} goes through here too: a deactivated user gets 403, not their
- * profile. Cost: one lookup by the unique
- * index {@code idx_app_users_auth_subject} per authenticated request.
+ * profile. Cost: one lookup by the unique index {@code idx_app_users_auth_subject} per
+ * authenticated request.
  */
 @Component
 public class ActiveUserInterceptor implements HandlerInterceptor {

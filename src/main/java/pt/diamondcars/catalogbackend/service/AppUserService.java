@@ -75,8 +75,7 @@ public class AppUserService {
 	 */
 	@Transactional(readOnly = true)
 	public AppUserResponse get(UUID id) {
-		return AppUserResponse.from(
-				appUserRepository.findById(id).orElseThrow(() -> notFound(id)));
+		return AppUserResponse.from(appUserRepository.findById(id).orElseThrow(() -> notFound(id)));
 	}
 
 	/**
