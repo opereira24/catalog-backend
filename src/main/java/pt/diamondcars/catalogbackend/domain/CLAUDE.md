@@ -61,8 +61,8 @@ do back-office portados do `dcbo-backend`.
 - **`car_images.created_at` das fotos anteriores à V2 é o `created_at` do carro** (a data real
   da foto não existe).
 - **`observacoes` é público**: está no `CarResponse` e o `dc` mostra-o na página do carro.
-  `synced_at`, `forwarded_at` e `forward_attempts` saíram na V3 (TASK-006), com o encaminhamento
-  para o `dcbo-backend`; os leads nunca encaminhados ficaram como leads normais.
+  As colunas do encaminhamento para o `dcbo-backend` (uma em `cars`, duas em `leads`) saíram na
+  V3 (TASK-006); os leads nunca encaminhados ficaram como leads normais.
 - **`Lead.car` é `updatable = false`**: o carro de um lead fixa-se na criação. O Hibernate grava a
   linha inteira, e sem isto uma edição podia repor o `car_id` de um carro já apagado (FK, 409).
   Prova em `service/BackOfficeLeadConcurrencyTest#anEditNeverWritesBackTheCarOfALead`.

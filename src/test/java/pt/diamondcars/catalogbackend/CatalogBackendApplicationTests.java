@@ -23,9 +23,9 @@ class CatalogBackendApplicationTests extends AbstractPostgresIntegrationTest {
 	/**
 	 * Verifies that the full Spring application context loads without errors, with the datasource
 	 * wired to the Testcontainers-managed PostgreSQL instance instead of the placeholder configured
-	 * in {@code application.yml}. Since TASK-006 this context also defines none of the old
-	 * forwarding properties ({@code DCBO_SYNC_URL}, {@code CATALOG_SYNC_TOKEN}, {@code
-	 * LEADS_FORWARD_*}): starting at all proves the service no longer needs them.
+	 * in {@code application.yml}. Since TASK-006 neither {@code application.yml} nor this context
+	 * defines any property of the removed lead forwarding to {@code dcbo-backend}: starting at all
+	 * proves the service no longer needs them.
 	 */
 	@Test
 	void contextLoads() {
