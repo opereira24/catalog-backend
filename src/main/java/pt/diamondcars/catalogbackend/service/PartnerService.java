@@ -80,6 +80,10 @@ public class PartnerService {
 	/**
 	 * Creates a new partner.
 	 *
+	 * <p>{@code saveAndFlush}, not {@code save}: the {@code INSERT} runs inside this method, so the
+	 * response carries the {@code createdAt}/{@code updatedAt} that were written ({@code save} left
+	 * both {@code null}; TASK-020).
+	 *
 	 * @param request the validated payload
 	 * @return the created partner
 	 */
@@ -87,7 +91,7 @@ public class PartnerService {
 	public PartnerResponse create(PartnerRequest request) {
 		Partner partner = new Partner();
 		applyRequest(partner, request);
-		return PartnerResponse.from(partnerRepository.save(partner));
+		return PartnerResponse.from(partnerRepository.saveAndFlush(partner));
 	}
 
 	/**
@@ -100,6 +104,10 @@ public class PartnerService {
 	 * unlocked edit running next to a sale wrote the old {@code cars_count} back (measured: 0 instead
 	 * of 1).
 	 *
+	 * <p>{@code saveAndFlush}, not dirty checking alone: the {@code UPDATE} runs inside this method, so
+	 * the response carries the {@code updatedAt} that was written (without it, the previous one;
+	 * TASK-020). A payload that changes nothing writes nothing and keeps the previous value.
+	 *
 	 * @param id the partner's id
 	 * @param request the validated payload
 	 * @return the updated partner
@@ -111,7 +119,7 @@ public class PartnerService {
 				.findByIdForUpdate(id)
 				.orElseThrow(() -> partnerNotFound(id));
 		applyRequest(partner, request);
-		return PartnerResponse.from(partner);
+		return PartnerResponse.from(partnerRepository.saveAndFlush(partner));
 	}
 
 	/**

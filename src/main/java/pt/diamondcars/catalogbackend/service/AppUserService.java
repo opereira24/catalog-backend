@@ -111,6 +111,10 @@ public class AppUserService {
 	 * Replaces a profile's name and role; never touches {@code authSubject}, {@code email} or {@code
 	 * active}.
 	 *
+	 * <p>{@code saveAndFlush}, not dirty checking alone: the {@code UPDATE} runs inside this method, so
+	 * the response carries the {@code updatedAt} that was written (without it, the previous one;
+	 * TASK-020). A payload that changes nothing writes nothing and keeps the previous value.
+	 *
 	 * @param id the profile's id
 	 * @param request the validated payload
 	 * @return the updated profile
@@ -121,7 +125,7 @@ public class AppUserService {
 		AppUser appUser = lockOrThrow(id);
 		appUser.setName(request.name());
 		appUser.setRole(AppUserRole.fromValue(request.role()));
-		return AppUserResponse.from(appUser);
+		return AppUserResponse.from(appUserRepository.saveAndFlush(appUser));
 	}
 
 	/**
@@ -129,6 +133,10 @@ public class AppUserService {
 	 * SelfDeactivationException}). Reactivating oneself never gets here: an inactive caller is
 	 * turned away by {@code ActiveUserInterceptor} first, and an active one activating themselves is
 	 * a no-op.
+	 *
+	 * <p>{@code saveAndFlush}, not dirty checking alone: the {@code UPDATE} runs inside this method, so
+	 * the response carries the {@code updatedAt} that was written (without it, the previous one;
+	 * TASK-020). Setting the value the profile already has writes nothing and keeps the previous one.
 	 *
 	 * @param id the profile's id
 	 * @param request the validated payload
@@ -144,7 +152,7 @@ public class AppUserService {
 			throw new SelfDeactivationException("Nao e possivel desativar o proprio perfil: " + id);
 		}
 		appUser.setActive(request.active());
-		return AppUserResponse.from(appUser);
+		return AppUserResponse.from(appUserRepository.saveAndFlush(appUser));
 	}
 
 	/**

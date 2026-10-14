@@ -74,6 +74,10 @@ public class ClientService {
 	/**
 	 * Creates a new client.
 	 *
+	 * <p>{@code saveAndFlush}, not {@code save}: the {@code INSERT} runs inside this method, so the
+	 * response carries the {@code createdAt}/{@code updatedAt} that were written ({@code save} left
+	 * both {@code null}; TASK-020).
+	 *
 	 * @param request the validated payload
 	 * @return the created client
 	 */
@@ -81,12 +85,16 @@ public class ClientService {
 	public ClientResponse create(ClientRequest request) {
 		Client client = new Client();
 		applyRequest(client, request);
-		return ClientResponse.from(clientRepository.save(client));
+		return ClientResponse.from(clientRepository.saveAndFlush(client));
 	}
 
 	/**
 	 * Updates an existing client, replacing every field with the given payload. Never touches
 	 * {@link Client#getPurchasesCount()}, which is only ever changed server-side on sale/reversal.
+	 *
+	 * <p>{@code saveAndFlush}, not dirty checking alone: the {@code UPDATE} runs inside this method, so
+	 * the response carries the {@code updatedAt} that was written (without it, the previous one;
+	 * TASK-020). A payload that changes nothing writes nothing and keeps the previous value.
 	 *
 	 * @param id the client's id
 	 * @param request the validated payload
@@ -97,7 +105,7 @@ public class ClientService {
 	public ClientResponse update(UUID id, ClientRequest request) {
 		Client client = lockOrThrow(id);
 		applyRequest(client, request);
-		return ClientResponse.from(client);
+		return ClientResponse.from(clientRepository.saveAndFlush(client));
 	}
 
 	/**
