@@ -81,7 +81,9 @@ class ForeignKeyNamingConventionTest extends AbstractPostgresIntegrationTest {
 		foreignKeys.forEach(fk -> deleteRuleByColumn.put(fk.get("fk_column"), fk.get("delete_rule")));
 		assertThat(deleteRuleByColumn)
 				.as("one entry per foreign key (a column with two foreign keys would collapse here)")
-				.hasSameSizeAs(foreignKeys)
+				.hasSameSizeAs(foreignKeys);
+		assertThat(deleteRuleByColumn)
+				.as("ON DELETE action of each foreign key")
 				.containsExactlyInAnyOrderEntriesOf(Map.of(
 						"car_images.car_id", "CASCADE",
 						"cars.client_id", "SET NULL",
