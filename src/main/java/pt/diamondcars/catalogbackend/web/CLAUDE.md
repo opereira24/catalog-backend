@@ -90,7 +90,9 @@ que caminho do `dcbo-backend` cada um substitui. `Perfil` é a expressão efetiv
 
 - **A tabela não pode derivar do código**: `config/BackOfficeSurfaceTest#inventoryInWebClaudeMdMatchesTheMappings`
   gera as linhas (colunas 1 a 5) a partir dos mapeamentos e falha se a tabela tiver uma a mais, uma a
-  menos ou uma diferente; a mensagem de erro traz as linhas geradas. O mesmo teste
+  menos ou uma diferente; a mensagem de erro traz as linhas geradas. Falha também se um mapeamento sob
+  `/api/backoffice` não declarar método HTTP (`@RequestMapping` sem `method`, que o Spring serve para
+  todos e a tabela não consegue listar): usar `@GetMapping`, `@PostMapping`, etc. A mesma classe
   (`#everyNonPublicApiRouteIsUnderTheBackOfficePrefixAndHasPreAuthorize`) é a guarda do prefixo e do
   perfil (ver "Prefixo" acima). A coluna 6 é história, não código: confere-se na review.
 - `POST /internal/leads` do `dcbo-backend` (o encaminhamento de leads do site) não tem correspondente:

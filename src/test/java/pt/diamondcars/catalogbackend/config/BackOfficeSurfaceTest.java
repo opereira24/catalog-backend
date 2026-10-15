@@ -160,20 +160,33 @@ class BackOfficeSurfaceTest extends AbstractPostgresIntegrationTest {
 	 * message lists the generated rows: a new endpoint is added to the table, never to an exception
 	 * list.
 	 *
+	 * <p>A mapping under the prefix without a declared HTTP method ({@code @RequestMapping("/x")}
+	 * without {@code method}, which Spring serves for every method) has no row to generate, so it
+	 * would silently stay out of the table: it fails here instead, closed, naming the path. The
+	 * table lists declared methods only, never a {@code *} row.
+	 *
 	 * <p>Mutants this test kills: deleting a row of the table; changing the {@code @PreAuthorize} of
-	 * {@code DELETE /api/backoffice/cars/{id}} to {@code hasAnyRole('ADMIN', 'USER')}.
+	 * {@code DELETE /api/backoffice/cars/{id}} to {@code hasAnyRole('ADMIN', 'USER')}; adding
+	 * {@code @RequestMapping("/{id}/ping") @PreAuthorize("hasRole('ADMIN')")} to {@code
+	 * BackOfficeCarController} (review r1, I-1: it survived when this loop only read the declared
+	 * methods).
 	 */
 	@Test
 	void inventoryInWebClaudeMdMatchesTheMappings() throws IOException {
 		List<String> generated = new ArrayList<>();
+		List<String> withoutAnHttpMethod = new ArrayList<>();
 		for (Map.Entry<RequestMappingInfo, HandlerMethod> entry : handlerMapping.getHandlerMethods().entrySet()) {
 			HandlerMethod handler = entry.getValue();
+			Set<RequestMethod> declared = entry.getKey().getMethodsCondition().getMethods();
 			for (PathPattern pattern : entry.getKey().getPathPatternsCondition().getPatterns()) {
 				String path = pattern.getPatternString();
 				if (!path.startsWith(BackOfficeApi.PREFIX + "/") && !path.equals(BackOfficeApi.PREFIX)) {
 					continue;
 				}
-				for (RequestMethod method : entry.getKey().getMethodsCondition().getMethods()) {
+				if (declared.isEmpty()) {
+					withoutAnHttpMethod.add(path + " -> " + handler.getShortLogMessage());
+				}
+				for (RequestMethod method : declared) {
 					generated.add(String.join(
 							" | ",
 							method.name(),
@@ -188,6 +201,10 @@ class BackOfficeSurfaceTest extends AbstractPostgresIntegrationTest {
 
 		List<String> documented = inventoryRows(Files.readString(WEB_CLAUDE_MD));
 
+		assertThat(withoutAnHttpMethod)
+				.as("back-office mappings without an HTTP method (Spring serves them for every method and the"
+						+ " inventory cannot list them): use @GetMapping, @PostMapping, @PutMapping, @PatchMapping or @DeleteMapping")
+				.isEmpty();
 		assertThat(generated).as("generated rows (positive control: the walk sees the back-office)").hasSizeGreaterThanOrEqualTo(44);
 		assertThat(documented)
 				.as("rows of the inventory in %s; the rows generated from the code are:%n%s", WEB_CLAUDE_MD, String.join("\n", generated))
