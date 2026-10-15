@@ -26,7 +26,11 @@ do back-office portados do `dcbo-backend`.
   `target("2")`. Uma migração nova que mexa em dados existentes merece um teste do mesmo tipo
   (migrar até à versão anterior, inserir por SQL, migrar, comparar). `V2ToV3UpgradeTest` compara
   todas as colunas que sobrevivem, com a lista lida de `information_schema.columns` antes da
-  migração (não precisa de manutenção quando o esquema cresce).
+  migração (não precisa de manutenção quando o esquema cresce). `V1ToLatestUpgradeTest` prova que
+  V1 + dados + todas as migrações dá o mesmo catálogo que uma BD nova; uma migração nova não precisa
+  de mexer nele. O catálogo (colunas com tipo, tamanho, `NOT NULL` e default; índices únicos; FKs com
+  `ON DELETE`; `CHECK`) é lido por `migration/SchemaCatalog`, e o da BD nova está pinado em
+  `FlywayMigrationTest#schemaMatchesThePinnedCatalog`: uma coluna nova muda esse teste de propósito.
 - **Migração que altere tabelas existentes: 1.ª linha `SET LOCAL lock_timeout = '10s';`, depois
   um único `LOCK TABLE` com as tabelas por ordem `cars`, `leads` (a da aplicação), antes de
   qualquer `ALTER`.** Provado por `migration/V3LockTest` (TASK-006). Porquê: o deploy no Render é
@@ -39,12 +43,20 @@ do back-office portados do `dcbo-backend`.
   (medido: no teste a vítima é a migração, que esperava há mais tempo; o arquiteto mediu-o com o
   `INSERT` do lead como vítima). Tabela nova na lista: pô-la na posição em que a aplicação a
   tranca.
+- **Expand/contract: `DROP` ou `RENAME` de uma coluna mapeada pelo JPA só na release a seguir à
+  que retirou o campo Java correspondente.** Simétrico: uma coluna nova `NOT NULL` leva `DEFAULT` na
+  mesma migração (ou nasce nullable e só fica `NOT NULL` na release seguinte), senão os `INSERT` da
+  instância antiga falham durante o deploy. Nenhum teste apanha isto: envolve duas versões do jar a
+  correr ao mesmo tempo (medido na review r1 da TASK-006: 500 em todos os endpoints que tocam a
+  coluna enquanto a instância antiga corre). Na 0.1.0 o efeito é nulo (nada em produção lê ainda
+  este serviço); a partir da 0.2.0 (corte do `dc`) é obrigatório.
 
 ## Factos do esquema que não se adivinham pelo código
 
-- **`cars.id` é gerado** (`DEFAULT gen_random_uuid()` + `@UuidGenerator`). Já não vem do
-  `dcbo-backend`. Nunca pôr `.id(...)` num `Car` novo: com id gerado, um id preenchido faz o
-  Spring Data tratar a entidade como existente (`merge` em vez de `INSERT`).
+- **O id é sempre gerado** (`DEFAULT gen_random_uuid()` + `@UuidGenerator`); `AbstractDomainEntity`
+  não expõe setter nem o `Car$CarBuilder` tem `id(...)`, de propósito: um id preenchido faria o
+  Spring Data tratar a entidade como existente (`merge` em vez de `INSERT`). Não acrescentar nenhum
+  dos dois. O `cars.id` já não vem do `dcbo-backend`.
 - **`leads.car_id` é FK para `cars` com `ON DELETE SET NULL`.** Apagar um carro mantém os
   leads, sem carro; o snapshot `carro_marca`/`carro_modelo`/`carro_preco` é o que continua a
   dizer de que carro era o lead.
@@ -71,8 +83,9 @@ do back-office portados do `dcbo-backend`.
   Um campo novo na entidade nunca aparece no site por acaso; acrescentar uma chave é uma decisão
   de contrato.
 - **ADR-001 camada 1 é testada pela positiva**: `ForeignKeyNamingConventionTest` exige que cada
-  FK do schema `public` se chame `<tabela referenciada sem o s final>_id` e fixa a lista de FKs.
-  Uma FK nova entra nessa lista.
+  FK do schema `public` se chame `<tabela referenciada sem o s final>_id` e fixa a lista de FKs com o
+  `ON DELETE` de cada uma (TASK-008: `CASCADE` em `car_images.car_id` e `notifications.lead_id`,
+  `SET NULL` nas outras 6). Uma FK nova entra nessa lista.
 
 ## Domínio Java (`domain/`)
 

@@ -30,6 +30,74 @@ back-office. Cada ponto tem um teste que o prova.
   público (`PublicCarController`, `CarQueryService`, `CarResponse`, `CarNotFoundException`, ...)
   não se toca por causa do back-office.
 
+## Inventário de endpoints
+
+Todos os endpoints do back-office (TASK-008), um por par método e caminho (`HEAD` é implícito em
+cada `GET` e não aparece). É o contrato que a release de corte do `dcbo` usa: a última coluna diz
+que caminho do `dcbo-backend` cada um substitui. `Perfil` é a expressão efetiva do
+`@PreAuthorize` (a do método, senão a da classe): `ADMIN` = `hasRole('ADMIN')`, `ADMIN, USER` =
+`hasAnyRole('ADMIN', 'USER')`, `autenticado` = `isAuthenticated()`. `Pedido` é o tipo do
+`@RequestBody`; `Resposta` é o tipo devolvido, com `ResponseEntity<T>` lido como `T`.
+
+<!-- inventario:inicio -->
+| Método | Caminho | Perfil | Pedido | Resposta | Origem no dcbo-backend |
+|---|---|---|---|---|---|
+| GET | `/api/backoffice/users` | ADMIN | — | `PagedModel<AppUserResponse>` | `GET /api/users` |
+| POST | `/api/backoffice/users` | ADMIN | `AppUserRequest` | `AppUserResponse` | `POST /api/users` |
+| GET | `/api/backoffice/users/{id}` | ADMIN | — | `AppUserResponse` | `GET /api/users/{id}` |
+| PUT | `/api/backoffice/users/{id}` | ADMIN | `AppUserUpdateRequest` | `AppUserResponse` | `PUT /api/users/{id}` |
+| DELETE | `/api/backoffice/users/{id}` | ADMIN | — | — | `DELETE /api/users/{id}` |
+| PATCH | `/api/backoffice/users/{id}/active` | ADMIN | `AppUserActiveRequest` | `AppUserResponse` | `PATCH /api/users/{id}/active` |
+| GET | `/api/backoffice/me` | autenticado | — | `AppUserResponse` | `GET /api/me` |
+| GET | `/api/backoffice/cars` | ADMIN, USER | — | `PagedModel<BackOfficeCarResponse>` | `GET /api/cars` |
+| POST | `/api/backoffice/cars` | ADMIN, USER | `CarRequest` | `BackOfficeCarResponse` | `POST /api/cars` |
+| GET | `/api/backoffice/cars/{id}` | ADMIN, USER | — | `BackOfficeCarResponse` | `GET /api/cars/{id}` |
+| PUT | `/api/backoffice/cars/{id}` | ADMIN, USER | `CarRequest` | `BackOfficeCarResponse` | `PUT /api/cars/{id}` |
+| DELETE | `/api/backoffice/cars/{id}` | ADMIN | — | — | `DELETE /api/cars/{id}` |
+| PATCH | `/api/backoffice/cars/{id}/highlight` | ADMIN, USER | `HighlightRequest` | `BackOfficeCarResponse` | `PATCH /api/cars/{id}/highlight` |
+| POST | `/api/backoffice/cars/{id}/release-reservation` | ADMIN, USER | — | `BackOfficeCarResponse` | `POST /api/cars/{id}/release-reservation` |
+| POST | `/api/backoffice/cars/{id}/reserve` | ADMIN, USER | — | `BackOfficeCarResponse` | `POST /api/cars/{id}/reserve` |
+| POST | `/api/backoffice/cars/{id}/revert-sale` | ADMIN, USER | — | `BackOfficeCarResponse` | `POST /api/cars/{id}/revert-sale` |
+| POST | `/api/backoffice/cars/{id}/sell` | ADMIN, USER | `SellCarRequest` | `BackOfficeCarResponse` | `POST /api/cars/{id}/sell` |
+| GET | `/api/backoffice/clients` | ADMIN, USER | — | `PagedModel<ClientResponse>` | `GET /api/clients` |
+| POST | `/api/backoffice/clients` | ADMIN, USER | `ClientRequest` | `ClientResponse` | `POST /api/clients` |
+| GET | `/api/backoffice/clients/{id}` | ADMIN, USER | — | `ClientResponse` | `GET /api/clients/{id}` |
+| PUT | `/api/backoffice/clients/{id}` | ADMIN, USER | `ClientRequest` | `ClientResponse` | `PUT /api/clients/{id}` |
+| DELETE | `/api/backoffice/clients/{id}` | ADMIN, USER | — | — | `DELETE /api/clients/{id}` |
+| GET | `/api/backoffice/clients/{id}/cars` | ADMIN, USER | — | `List<BackOfficeCarResponse>` | `GET /api/clients/{id}/cars` |
+| GET | `/api/backoffice/partners` | ADMIN, USER | — | `PagedModel<PartnerResponse>` | `GET /api/partners` |
+| POST | `/api/backoffice/partners` | ADMIN, USER | `PartnerRequest` | `PartnerResponse` | `POST /api/partners` |
+| GET | `/api/backoffice/partners/{id}` | ADMIN, USER | — | `PartnerResponse` | `GET /api/partners/{id}` |
+| PUT | `/api/backoffice/partners/{id}` | ADMIN, USER | `PartnerRequest` | `PartnerResponse` | `PUT /api/partners/{id}` |
+| DELETE | `/api/backoffice/partners/{id}` | ADMIN, USER | — | — | `DELETE /api/partners/{id}` |
+| GET | `/api/backoffice/partners/{id}/cars` | ADMIN, USER | — | `List<BackOfficeCarResponse>` | `GET /api/partners/{id}/cars` |
+| GET | `/api/backoffice/transactions` | ADMIN, USER | — | `PagedModel<TransactionResponse>` | `GET /api/transactions` |
+| POST | `/api/backoffice/transactions` | ADMIN, USER | `TransactionRequest` | `TransactionResponse` | `POST /api/transactions` |
+| GET | `/api/backoffice/transactions/{id}` | ADMIN, USER | — | `TransactionResponse` | `GET /api/transactions/{id}` |
+| PUT | `/api/backoffice/transactions/{id}` | ADMIN, USER | `TransactionRequest` | `TransactionResponse` | `PUT /api/transactions/{id}` |
+| DELETE | `/api/backoffice/transactions/{id}` | ADMIN, USER | — | — | `DELETE /api/transactions/{id}` |
+| GET | `/api/backoffice/finances/summary` | ADMIN, USER | — | `FinanceSummaryResponse` | `GET /api/finances/summary` |
+| GET | `/api/backoffice/leads` | ADMIN, USER | — | `PagedModel<BackOfficeLeadResponse>` | `GET /api/leads` |
+| POST | `/api/backoffice/leads` | ADMIN, USER | `BackOfficeLeadRequest` | `BackOfficeLeadResponse` | `POST /api/leads` |
+| GET | `/api/backoffice/leads/{id}` | ADMIN, USER | — | `BackOfficeLeadResponse` | `GET /api/leads/{id}` |
+| PUT | `/api/backoffice/leads/{id}` | ADMIN, USER | `BackOfficeLeadRequest` | `BackOfficeLeadResponse` | `PUT /api/leads/{id}` |
+| DELETE | `/api/backoffice/leads/{id}` | ADMIN, USER | — | — | `DELETE /api/leads/{id}` |
+| GET | `/api/backoffice/notifications` | ADMIN, USER | — | `PagedModel<NotificationResponse>` | `GET /api/notifications` |
+| POST | `/api/backoffice/notifications/read-all` | ADMIN, USER | — | — | `POST /api/notifications/read-all` |
+| DELETE | `/api/backoffice/notifications/{id}` | ADMIN, USER | — | — | `DELETE /api/notifications/{id}` |
+| PATCH | `/api/backoffice/notifications/{id}/read` | ADMIN, USER | — | `NotificationResponse` | `PATCH /api/notifications/{id}/read` |
+<!-- inventario:fim -->
+
+- **A tabela não pode derivar do código**: `config/BackOfficeSurfaceTest#inventoryInWebClaudeMdMatchesTheMappings`
+  gera as linhas (colunas 1 a 5) a partir dos mapeamentos e falha se a tabela tiver uma a mais, uma a
+  menos ou uma diferente; a mensagem de erro traz as linhas geradas. Falha também se um mapeamento sob
+  `/api/backoffice` não declarar método HTTP (`@RequestMapping` sem `method`, que o Spring serve para
+  todos e a tabela não consegue listar): usar `@GetMapping`, `@PostMapping`, etc. A mesma classe
+  (`#everyNonPublicApiRouteIsUnderTheBackOfficePrefixAndHasPreAuthorize`) é a guarda do prefixo e do
+  perfil (ver "Prefixo" acima). A coluna 6 é história, não código: confere-se na review.
+- `POST /internal/leads` do `dcbo-backend` (o encaminhamento de leads do site) não tem correspondente:
+  foi removido na TASK-006, e o `POST /api/leads` público grava o lead diretamente.
+
 ## `@PreAuthorize("hasAnyRole('ADMIN', 'USER')")` na classe
 
 - "Autenticado" não chega: um token válido do tenant **sem role** (signup na app SPA, ou
@@ -203,8 +271,12 @@ também bloqueia o `UPDATE` do mutante, por isso há 1 sessão em `Lock` nos doi
 escrevem a linha (`UPDATE`/`DELETE` sem commit, como no K8) também não distinguem os dois modos. Em
 `service/AppUserConcurrencyTest` (K-U6) e `service/BackOfficeLeadConcurrencyTest`
 (`twoConcurrentEditsOfTheSameLeadBothSucceed`), helper `whileShareLocked`. Os outros
-`findByIdForUpdate` (`ClientRepository`, `PartnerRepository`, `CarRepository`) ainda não têm este
-teste.
+`findByIdForUpdate` (`ClientRepository:34`, `PartnerRepository:34`, `CarRepository:130`) não precisam
+do portão `FOR SHARE`: a força deles já está provada por `service/CarSaleConcurrencyTest`, onde os
+portões e as corridas são outra transação de escrita a pedir o mesmo lock. Medido na review r1 da
+TASK-020 e repetido na TASK-008: `PESSIMISTIC_READ` em `ClientRepository` faz cair k3, k6, k7, k15;
+em `PartnerRepository` k2, k5, k10, k14; em `CarRepository` k1, k4, k9, k11, k12, k13 e
+`featuringTheSameCarTwiceAtTheLimitSucceedsTwiceAndFeaturesItOnce`.
 
 ## Clientes e parceiros (TASK-004)
 
