@@ -10,8 +10,7 @@ import pt.diamondcars.catalogbackend.domain.car.CarImage;
 /**
  * Response payload for every {@code GET /api/cars*} endpoint (TASK-014), covering exactly the
  * fields TASK-013 requirement 1 lists as what the public site needs — never the {@link Car}
- * entity itself and never {@link Car#getSyncedAt()}, which is an internal sync-diagnosis field
- * (requirement 4).
+ * entity itself, so a field added to the entity never reaches the site by accident.
  *
  * @param id the car's identifier
  * @param _id the same value as {@link #id}, kept only so {@code dc} can migrate without a

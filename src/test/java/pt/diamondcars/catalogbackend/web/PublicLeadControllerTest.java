@@ -1,55 +1,50 @@
 package pt.diamondcars.catalogbackend.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
-import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
-import static org.springframework.test.web.client.response.MockRestResponseCreators.withServerError;
-import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
+import jakarta.persistence.EntityManagerFactory;
+import java.math.BigDecimal;
+import java.util.Map;
 import java.util.UUID;
 import org.hamcrest.Matchers;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
-import org.springframework.test.web.client.ExpectedCount;
-import org.springframework.test.web.client.MockRestServiceServer;
-import org.springframework.test.web.client.ResponseCreator;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.web.client.RestClient;
-import pt.diamondcars.catalogbackend.config.LeadForwardingClientConfig;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import pt.diamondcars.catalogbackend.domain.car.Car;
+import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.domain.lead.Lead;
 import pt.diamondcars.catalogbackend.domain.lead.LeadOrigin;
 import pt.diamondcars.catalogbackend.domain.lead.LeadRepository;
+import pt.diamondcars.catalogbackend.domain.lead.LeadStatus;
+import pt.diamondcars.catalogbackend.domain.notification.NotificationRepository;
+import pt.diamondcars.catalogbackend.service.LeadService;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
+import pt.diamondcars.catalogbackend.web.dto.LeadRequest;
 
 /**
- * End-to-end tests of {@link PublicLeadController}, {@code LeadService}, {@code LeadForwarder}
- * and {@link RateLimitInterceptor} through the real servlet filter chain (TASK-015), using {@link
- * MockMvc} against a real PostgreSQL container ({@link AbstractPostgresIntegrationTest},
- * TASK-002) and a {@link MockRestServiceServer} standing in for {@code dcbo-backend} — never a
- * real HTTP call. {@code app.leads.forward.retry.enabled=false} (requirement 7) is inherited from
- * {@link AbstractPostgresIntegrationTest}, not repeated here (review r1, IMPORTANTE 4).
+ * End-to-end tests of {@link PublicLeadController}, {@code LeadService}, {@code
+ * NotificationService#createForNewLead} and {@link RateLimitInterceptor} through the real servlet
+ * filter chain (TASK-015, TASK-006), using {@link MockMvc} against a real PostgreSQL container
+ * ({@link AbstractPostgresIntegrationTest}). Same context configuration as the back-office tests (no
+ * {@code @MockitoBean}, {@code @Import} or extra properties), so the cached context is shared.
  *
- * <p>Every test that triggers a forward calls {@link #awaitForwardOutcome(UUID)} before finishing
- * (review r1, IMPORTANTE 5: forwarding is now {@code @Async}), so this test class never races the
- * background executor thread — without that, a still-in-flight forward from one test could reach
- * {@link #dcboBackend} only after the next test's {@link #setUp()} rebinds it to a different set
- * of expectations, corrupting an unrelated test.
+ * <p>Since TASK-006 a lead is not forwarded anywhere: it is saved with its back-office notification
+ * in one transaction. The public contract (URL, body, validation, sanitizing, rate limit, {@code
+ * 201 {"id": ...}}) is the one TASK-015 fixed, unchanged.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
@@ -57,326 +52,145 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 
 	@Autowired private MockMvc mockMvc;
 	@Autowired private LeadRepository leadRepository;
-
-	@Autowired
-	@Qualifier(LeadForwardingClientConfig.BEAN_NAME)
-	private RestClient.Builder leadForwardingRestClientBuilder;
-
-	private MockRestServiceServer dcboBackend;
+	@Autowired private CarRepository carRepository;
+	@Autowired private NotificationRepository notificationRepository;
+	@Autowired private LeadService leadService;
+	@Autowired private PlatformTransactionManager transactionManager;
+	@Autowired private JdbcTemplate jdbcTemplate;
+	@Autowired private EntityManagerFactory entityManagerFactory;
 
 	/**
-	 * Clears every lead written by a previous test and rebinds a fresh {@link
-	 * MockRestServiceServer} to the forwarding client, so tests never influence each other on the
-	 * shared, JVM-wide container/context ({@link AbstractPostgresIntegrationTest}).
+	 * Clears every notification, lead and car written by a previous test (the container is shared by
+	 * the whole JVM, with no per-test rollback).
 	 */
 	@BeforeEach
 	void setUp() {
-		leadRepository.deleteAll();
-		dcboBackend = MockRestServiceServer.bindTo(leadForwardingRestClientBuilder).build();
+		notificationRepository.deleteAllInBatch();
+		leadRepository.deleteAllInBatch();
+		carRepository.deleteAll();
 	}
 
 	/**
-	 * Acceptance criterion: a valid payload with a {@code carroId} is persisted with {@code origem
-	 * = "website"}, and the forward to {@code dcbo-backend} succeeds and marks {@code
-	 * forwardedAt}.
+	 * A valid payload with a {@code carroId} that matches no car is persisted with {@code origem =
+	 * website} (decided by the presence of {@code carroId}).
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
-	void createsALeadWithCarAndForwardsItSuccessfully() throws Exception {
-		dcboBackend
-				.expect(requestTo("http://localhost:8080/internal/leads"))
-				.andExpect(method(HttpMethod.POST))
-				.andExpect(header("X-Internal-Token", "placeholder"))
-				.andRespond(withSuccess());
-
-		String body =
-				"""
+	void createsALeadWithCarroId() throws Exception {
+		String body = """
 				{"nome":"Joao Cliente","telefone":"913456789","email":"joao@example.com",
 				 "carroId":"%s","carroMarca":"BMW","carroModelo":"320d"}
-				"""
-						.formatted(UUID.randomUUID());
+				""".formatted(UUID.randomUUID());
 
-		String responseBody =
-				mockMvc
-						.perform(
-								post("/api/leads")
-										.with(request -> {
-											request.setRemoteAddr("10.0.0.1");
-											return request;
-										})
-										.contentType(MediaType.APPLICATION_JSON)
-										.content(body))
-						.andExpect(status().isCreated())
-						.andExpect(jsonPath("$.id").exists())
-						.andReturn()
-						.getResponse()
-						.getContentAsString();
+		UUID leadId = createLead("10.0.0.1", body);
 
-		UUID leadId = extractId(responseBody);
-		awaitForwardOutcome(leadId);
-		dcboBackend.verify();
-
-		Lead saved = leadRepository.findById(leadId).orElseThrow();
-		assertThat(saved.getOrigem()).isEqualTo(LeadOrigin.WEBSITE);
-		assertThat(saved.getForwardedAt()).isNotNull();
+		assertThat(leadRepository.findById(leadId).orElseThrow().getOrigem()).isEqualTo(LeadOrigin.WEBSITE);
 	}
 
 	/**
-	 * Acceptance criterion: a valid payload without {@code carroId} (general contact) is persisted
-	 * with {@code origem = "website-contacto"}.
+	 * A valid payload without {@code carroId} (general contact) is persisted with {@code origem =
+	 * website-contacto}.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void createsAGeneralContactLeadWithoutACar() throws Exception {
-		dcboBackend.expect(requestTo("http://localhost:8080/internal/leads")).andRespond(withSuccess());
-
-		String body = """
+		UUID leadId = createLead("10.0.0.2", """
 				{"nome":"Maria Interessada","telefone":"914567890"}
-				""";
+				""");
 
-		String responseBody =
-				mockMvc
-						.perform(
-								post("/api/leads")
-										.with(request -> {
-											request.setRemoteAddr("10.0.0.2");
-											return request;
-										})
-										.contentType(MediaType.APPLICATION_JSON)
-										.content(body))
-						.andExpect(status().isCreated())
-						.andReturn()
-						.getResponse()
-						.getContentAsString();
-
-		UUID leadId = extractId(responseBody);
-		awaitForwardOutcome(leadId);
-		Lead saved = leadRepository.findById(leadId).orElseThrow();
-		assertThat(saved.getOrigem()).isEqualTo(LeadOrigin.WEBSITE_CONTACTO);
+		assertThat(leadRepository.findById(leadId).orElseThrow().getOrigem()).isEqualTo(LeadOrigin.WEBSITE_CONTACTO);
 	}
 
 	/**
-	 * Acceptance criterion: missing {@code telefone} is rejected with 400 naming the field, and a
-	 * malformed {@code email} is also rejected with 400.
+	 * Missing {@code telefone} is rejected with 400 naming the field, and a malformed {@code email} is
+	 * also rejected with 400.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void rejectsMissingTelefoneAndMalformedEmail() throws Exception {
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.3");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content("""
-										{"nome":"Sem Telefone"}
-										"""))
+				.perform(postLead("10.0.0.3", """
+						{"nome":"Sem Telefone"}
+						"""))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value(Matchers.containsString("telefone")));
 
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.3");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content("""
-										{"nome":"Email Invalido","telefone":"913456789","email":"nao-e-email"}
-										"""))
+				.perform(postLead("10.0.0.3", """
+						{"nome":"Email Invalido","telefone":"913456789","email":"nao-e-email"}
+						"""))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value(Matchers.containsString("email")));
 
 		assertThat(leadRepository.count()).isZero();
+		assertThat(notificationRepository.count()).isZero();
 	}
 
 	/**
-	 * Acceptance criterion: a {@code mensagem} containing {@code <script>alert(1)</script>} is
-	 * persisted without the literal {@code <script} substring.
+	 * A {@code mensagem} containing {@code <script>alert(1)</script>} is persisted without the literal
+	 * {@code <script} substring, in {@code leads.mensagem} (never in {@code notas}, TASK-006 AC C.2).
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
-	void sanitizesAMensagemContainingAScriptTag() throws Exception {
-		dcboBackend.expect(requestTo("http://localhost:8080/internal/leads")).andRespond(withSuccess());
+	void sanitizesAMensagemContainingAScriptTagAndKeepsItInMensagem() throws Exception {
+		UUID leadId = createLead("10.0.0.4", """
+				{"nome":"Atacante","telefone":"913456789","mensagem":"<script>alert(1)</script>"}
+				""");
 
-		String responseBody =
-				mockMvc
-						.perform(
-								post("/api/leads")
-										.with(request -> {
-											request.setRemoteAddr("10.0.0.4");
-											return request;
-										})
-										.contentType(MediaType.APPLICATION_JSON)
-										.content(
-												"""
-												{"nome":"Atacante","telefone":"913456789",
-												 "mensagem":"<script>alert(1)</script>"}
-												"""))
-						.andExpect(status().isCreated())
-						.andReturn()
-						.getResponse()
-						.getContentAsString();
-
-		UUID leadId = extractId(responseBody);
-		awaitForwardOutcome(leadId);
 		Lead saved = leadRepository.findById(leadId).orElseThrow();
-		assertThat(saved.getMensagem()).doesNotContain("<script");
+		assertThat(saved.getMensagem()).isNotBlank().doesNotContain("<script");
+		assertThat(saved.getNotas()).isNull();
 	}
 
 	/**
-	 * Acceptance criterion: 5 submissions from the same IP within the configured window succeed,
-	 * and the 6th is rejected with 429.
+	 * 5 submissions from the same IP within the configured window succeed, and the 6th is rejected
+	 * with 429.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void rejectsTheSixthSubmissionFromTheSameIpWithinTheWindow() throws Exception {
-		dcboBackend.expect(ExpectedCount.times(5), requestTo("http://localhost:8080/internal/leads")).andRespond(withSuccess());
-
 		String body = """
 				{"nome":"Rate Limitado","telefone":"913456789"}
 				""";
-
-		List<UUID> leadIds = new ArrayList<>();
 		for (int i = 0; i < 5; i++) {
-			String responseBody =
-					mockMvc
-							.perform(
-									post("/api/leads")
-											.with(request -> {
-												request.setRemoteAddr("10.0.0.5");
-												return request;
-											})
-											.contentType(MediaType.APPLICATION_JSON)
-											.content(body))
-							.andExpect(status().isCreated())
-							.andReturn()
-							.getResponse()
-							.getContentAsString();
-			leadIds.add(extractId(responseBody));
+			mockMvc.perform(postLead("10.0.0.5", body)).andExpect(status().isCreated());
 		}
 
+		mockMvc.perform(postLead("10.0.0.5", body)).andExpect(status().isTooManyRequests());
+	}
+
+	/**
+	 * TASK-015 review r1, BLOQUEADOR 1: a phone number formatted like the public site's own
+	 * placeholder ({@code dc/src/pages/Contact.js:232}, {@code "+351 912 345 678"}) is accepted and
+	 * normalized (spaces stripped) before being persisted.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void acceptsAPhoneNumberFormattedLikeTheSitesOwnPlaceholderAndNormalizesIt() throws Exception {
+		UUID leadId = createLead("10.0.0.10", """
+				{"nome":"Site Publico","telefone":"+351 912 345 678"}
+				""");
+
+		assertThat(leadRepository.findById(leadId).orElseThrow().getTelefone()).isEqualTo("+351912345678");
+	}
+
+	/**
+	 * TASK-015 review r1, BLOQUEADOR 1: a {@code nome} shorter than 2 characters is rejected with 400.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void rejectsANameShorterThanTwoCharacters() throws Exception {
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.5");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content(body))
-				.andExpect(status().isTooManyRequests());
-
-		for (UUID leadId : leadIds) {
-			awaitForwardOutcome(leadId);
-		}
-	}
-
-	/**
-	 * Acceptance criterion: when the forwarding call to {@code dcbo-backend} fails, {@code
-	 * POST /api/leads} still responds 201, the lead is persisted, and {@code forwardedAt} stays
-	 * {@code null}.
-	 *
-	 * @throws Exception propagated from {@link MockMvc#perform}
-	 */
-	@Test
-	void respondsCreatedEvenWhenForwardingFails() throws Exception {
-		dcboBackend.expect(requestTo("http://localhost:8080/internal/leads")).andRespond(withServerError());
-
-		String responseBody =
-				mockMvc
-						.perform(
-								post("/api/leads")
-										.with(request -> {
-											request.setRemoteAddr("10.0.0.6");
-											return request;
-										})
-										.contentType(MediaType.APPLICATION_JSON)
-										.content("""
-												{"nome":"Falha Encaminho","telefone":"913456789"}
-												"""))
-						.andExpect(status().isCreated())
-						.andReturn()
-						.getResponse()
-						.getContentAsString();
-
-		UUID leadId = extractId(responseBody);
-		awaitForwardOutcome(leadId);
-		Lead saved = leadRepository.findById(leadId).orElseThrow();
-		assertThat(saved.getForwardedAt()).isNull();
-		assertThat(saved.getForwardAttempts()).isEqualTo(1);
-	}
-
-	/**
-	 * TASK-015 review r1, BLOQUEADOR 1: a phone number formatted exactly like the public site's own
-	 * placeholder ({@code dc/src/pages/Contact.js:232}, {@code "+351 912 345 678"}) — which {@code
-	 * dcbo-backend}'s stricter pattern would have rejected with 400 during forwarding, silently
-	 * losing the lead — is accepted here, normalized (spaces stripped) before being persisted and
-	 * forwarded, and successfully reaches {@code dcbo-backend}.
-	 *
-	 * @throws Exception propagated from {@link MockMvc#perform}
-	 */
-	@Test
-	void acceptsAPhoneNumberFormattedLikeTheSitesOwnPlaceholderAndNormalizesItBeforeForwarding() throws Exception {
-		dcboBackend
-				.expect(requestTo("http://localhost:8080/internal/leads"))
-				.andExpect(content().string(Matchers.containsString("\"telefone\":\"+351912345678\"")))
-				.andRespond(withSuccess());
-
-		String responseBody =
-				mockMvc
-						.perform(
-								post("/api/leads")
-										.with(request -> {
-											request.setRemoteAddr("10.0.0.10");
-											return request;
-										})
-										.contentType(MediaType.APPLICATION_JSON)
-										.content("""
-												{"nome":"Site Publico","telefone":"+351 912 345 678"}
-												"""))
-						.andExpect(status().isCreated())
-						.andReturn()
-						.getResponse()
-						.getContentAsString();
-
-		UUID leadId = extractId(responseBody);
-		awaitForwardOutcome(leadId);
-		dcboBackend.verify();
-
-		Lead saved = leadRepository.findById(leadId).orElseThrow();
-		assertThat(saved.getTelefone()).isEqualTo("+351912345678");
-		assertThat(saved.getForwardedAt()).isNotNull();
-	}
-
-	/**
-	 * TASK-015 review r1, BLOQUEADOR 1: a {@code nome} shorter than {@code dcbo-backend}'s own
-	 * minimum (2 characters) is rejected here with 400, instead of being accepted with 201 and then
-	 * silently lost when the forward is rejected.
-	 *
-	 * @throws Exception propagated from {@link MockMvc#perform}
-	 */
-	@Test
-	void rejectsANameShorterThanDcboBackendAccepts() throws Exception {
-		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.11");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content("""
-										{"nome":"A","telefone":"913456789"}
-										"""))
+				.perform(postLead("10.0.0.11", """
+						{"nome":"A","telefone":"913456789"}
+						"""))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value(Matchers.containsString("nome")));
 
@@ -384,25 +198,14 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * TASK-015 review r1, BLOQUEADOR 1: a {@code nome} longer than {@code dcbo-backend}'s own
-	 * maximum (100 characters) is rejected here with 400, instead of being accepted with 201 and
-	 * then silently lost when the forward is rejected.
+	 * TASK-015 review r1, BLOQUEADOR 1: a {@code nome} longer than 100 characters is rejected with 400.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
-	void rejectsANameLongerThanDcboBackendAccepts() throws Exception {
-		String longName = "A".repeat(150);
-
+	void rejectsANameLongerThanOneHundredCharacters() throws Exception {
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.12");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content("{\"nome\":\"" + longName + "\",\"telefone\":\"913456789\"}"))
+				.perform(postLead("10.0.0.12", "{\"nome\":\"" + "A".repeat(150) + "\",\"telefone\":\"913456789\"}"))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value(Matchers.containsString("nome")));
 
@@ -410,29 +213,18 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * TASK-015 review r1, BLOQUEADOR 1: a {@code mensagem} that fits under {@code dcbo-backend}'s
-	 * 1000-character limit <b>before</b> sanitizing, but grows past it once HTML-entity escaping
-	 * expands every {@code /} into the six characters {@code &#x2F;}, is rejected here with 400 —
-	 * proving the length bound is now checked after sanitizing, not before.
+	 * TASK-015 review r1, BLOQUEADOR 1: a {@code mensagem} that fits the 1000-character limit before
+	 * sanitizing, but grows past it once HTML-entity escaping expands every {@code /} into {@code
+	 * &#x2F;}, is rejected with 400: the bound is checked after sanitizing.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void rejectsAMensagemThatOnlyExceedsTheLimitAfterSanitizationEscaping() throws Exception {
-		String rawMensagem = "/".repeat(200);
-
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.13");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content(
-										"{\"nome\":\"Mensagem Grande\",\"telefone\":\"913456789\",\"mensagem\":\""
-												+ rawMensagem
-												+ "\"}"))
+				.perform(postLead(
+						"10.0.0.13",
+						"{\"nome\":\"Mensagem Grande\",\"telefone\":\"913456789\",\"mensagem\":\"" + "/".repeat(200) + "\"}"))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value(Matchers.containsString("mensagem")));
 
@@ -440,30 +232,18 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * TASK-015 review r1, IMPORTANTE 2: an email whose quoted local part carries markup ({@code
-	 * "<svg/onload=alert(1)>"@x.pt}) satisfies {@code @Email}'s own format check (quoted local
-	 * parts are valid per RFC) but is rejected here with 400, closing the one XSS vector {@code
-	 * @Email} alone lets through.
+	 * TASK-015 review r1, IMPORTANTE 2: an email whose quoted local part carries markup satisfies
+	 * {@code @Email} but is rejected with 400.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void rejectsAnEmailContainingMarkupCharactersInAQuotedLocalPart() throws Exception {
-		String body =
-				"""
-				{"nome":"Atacante Email","telefone":"913456789",
-				 "email":"\\\"<svg/onload=alert(1)>\\\"@x.pt"}
-				""";
-
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.14");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content(body))
+				.perform(postLead("10.0.0.14", """
+						{"nome":"Atacante Email","telefone":"913456789",
+						 "email":"\\\"<svg/onload=alert(1)>\\\"@x.pt"}
+						"""))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value(Matchers.containsString("email")));
 
@@ -471,26 +251,17 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * TASK-015 review r1, IMPORTANTE 2: a {@code telefone} carrying an HTML injection payload
-	 * instead of digits is rejected with 400 by the same pattern that fixes BLOQUEADOR 1 — a value
-	 * shaped like this can never match the phone format, so it is rejected before it could ever be
-	 * stored or forwarded raw.
+	 * TASK-015 review r1, IMPORTANTE 2: a {@code telefone} carrying an HTML injection payload instead
+	 * of digits is rejected with 400.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void rejectsATelefoneContainingMarkupInsteadOfDigits() throws Exception {
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.15");
-									return request;
-								})
-								.contentType(MediaType.APPLICATION_JSON)
-								.content("""
-										{"nome":"Atacante Telefone","telefone":"<img src=x onerror=alert(1)>"}
-										"""))
+				.perform(postLead("10.0.0.15", """
+						{"nome":"Atacante Telefone","telefone":"<img src=x onerror=alert(1)>"}
+						"""))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value(Matchers.containsString("telefone")));
 
@@ -498,244 +269,275 @@ class PublicLeadControllerTest extends AbstractPostgresIntegrationTest {
 	}
 
 	/**
-	 * TASK-015 review r1, BLOQUEADOR 2: distinct visitors that all arrive through the same proxy
-	 * address (the same {@code getRemoteAddr()}, as every visitor's would be on Render) but with
-	 * distinct {@code X-Forwarded-For} values are rate-limited independently — none of the first 6
-	 * distinct visitors is rejected, proving the limiter no longer treats the whole proxy as a
-	 * single visitor.
+	 * TASK-015 review r1, BLOQUEADOR 2: distinct visitors behind the same proxy address but with
+	 * distinct {@code X-Forwarded-For} values are rate-limited independently.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void distinctVisitorsBehindTheSameProxyAddressAreRateLimitedIndependently() throws Exception {
-		dcboBackend
-				.expect(ExpectedCount.times(6), requestTo("http://localhost:8080/internal/leads"))
-				.andRespond(withSuccess());
-
 		String body = """
 				{"nome":"Visitante Distinto","telefone":"913456789"}
 				""";
-
-		List<UUID> leadIds = new ArrayList<>();
 		for (int i = 0; i < 6; i++) {
-			String responseBody =
-					mockMvc
-							.perform(
-									post("/api/leads")
-											.with(request -> {
-												request.setRemoteAddr("10.0.0.200");
-												return request;
-											})
-											.header("X-Forwarded-For", "203.0.113." + i)
-											.contentType(MediaType.APPLICATION_JSON)
-											.content(body))
-							.andExpect(status().isCreated())
-							.andReturn()
-							.getResponse()
-							.getContentAsString();
-			leadIds.add(extractId(responseBody));
+			mockMvc
+					.perform(postLead("10.0.0.200", body).header("X-Forwarded-For", "203.0.113." + i))
+					.andExpect(status().isCreated());
 		}
-
-		for (UUID leadId : leadIds) {
-			awaitForwardOutcome(leadId);
-		}
-		dcboBackend.verify();
 	}
 
 	/**
-	 * TASK-015 review r2, IMPORTANTE 1: a real client behind a trusted proxy that <b>appends</b> to
-	 * {@code X-Forwarded-For} (as any real reverse proxy does) cannot bypass the limit by sending a
-	 * different, fabricated left-most entry on every request — only the right-most entry (the one
-	 * the trusted proxy itself appended) is used to resolve the bucket, so the 6th submission from
-	 * this client is still rejected even though the left-most entry is different every time.
-	 *
-	 * <p>Before the fix (review r1's left-most reading), this exact sequence returned 201 twelve
-	 * times in a row with no 429 (r2's real-HTTP reproduction).
+	 * TASK-015 review r2, IMPORTANTE 1: a client behind a trusted proxy cannot bypass the limit by
+	 * rotating a fabricated left-most {@code X-Forwarded-For} entry; only the right-most entry (the
+	 * one the trusted proxy appended) resolves the bucket.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void rejectsTheSixthSubmissionEvenWhenTheLeftMostForwardedForEntryIsSpoofedAndRotates() throws Exception {
-		dcboBackend.expect(ExpectedCount.times(5), requestTo("http://localhost:8080/internal/leads")).andRespond(withSuccess());
-
 		String body = """
 				{"nome":"Spoofer Rate Limit","telefone":"913456789"}
 				""";
-
-		List<UUID> leadIds = new ArrayList<>();
 		for (int i = 0; i < 5; i++) {
-			String responseBody =
-					mockMvc
-							.perform(
-									post("/api/leads")
-											.with(request -> {
-												request.setRemoteAddr("10.0.0.201");
-												return request;
-											})
-											.header("X-Forwarded-For", "198.51.100." + i + ", 203.0.113.99")
-											.contentType(MediaType.APPLICATION_JSON)
-											.content(body))
-							.andExpect(status().isCreated())
-							.andReturn()
-							.getResponse()
-							.getContentAsString();
-			leadIds.add(extractId(responseBody));
+			mockMvc
+					.perform(postLead("10.0.0.201", body).header("X-Forwarded-For", "198.51.100." + i + ", 203.0.113.99"))
+					.andExpect(status().isCreated());
 		}
 
 		mockMvc
-				.perform(
-						post("/api/leads")
-								.with(request -> {
-									request.setRemoteAddr("10.0.0.201");
-									return request;
-								})
-								.header("X-Forwarded-For", "198.51.100.99, 203.0.113.99")
-								.contentType(MediaType.APPLICATION_JSON)
-								.content(body))
+				.perform(postLead("10.0.0.201", body).header("X-Forwarded-For", "198.51.100.99, 203.0.113.99"))
 				.andExpect(status().isTooManyRequests());
-
-		for (UUID leadId : leadIds) {
-			awaitForwardOutcome(leadId);
-		}
 	}
 
 	/**
-	 * TASK-015 review r1, IMPORTANTE 3: 5 CORS preflight {@code OPTIONS} requests from the same
-	 * address, followed by 5 real {@code POST} submissions from that same address, all 5 {@code
-	 * POST}s still succeed — proving the preflights never consumed any of the visitor's quota.
+	 * TASK-015 review r1, IMPORTANTE 3: CORS preflight {@code OPTIONS} requests never consume the
+	 * visitor's quota.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
 	void preflightOptionsRequestsDoNotConsumeTheRateLimitQuota() throws Exception {
 		for (int i = 0; i < 5; i++) {
-			mockMvc.perform(
-					options("/api/leads")
-							.with(request -> {
-								request.setRemoteAddr("10.0.0.16");
-								return request;
-							}));
+			mockMvc.perform(options("/api/leads").with(request -> {
+				request.setRemoteAddr("10.0.0.16");
+				return request;
+			}));
 		}
-
-		dcboBackend.expect(ExpectedCount.times(5), requestTo("http://localhost:8080/internal/leads")).andRespond(withSuccess());
-
 		String body = """
 				{"nome":"Depois De Preflights","telefone":"913456789"}
 				""";
-
-		List<UUID> leadIds = new ArrayList<>();
 		for (int i = 0; i < 5; i++) {
-			String responseBody =
-					mockMvc
-							.perform(
-									post("/api/leads")
-											.with(request -> {
-												request.setRemoteAddr("10.0.0.16");
-												return request;
-											})
-											.contentType(MediaType.APPLICATION_JSON)
-											.content(body))
-							.andExpect(status().isCreated())
-							.andReturn()
-							.getResponse()
-							.getContentAsString();
-			leadIds.add(extractId(responseBody));
-		}
-
-		for (UUID leadId : leadIds) {
-			awaitForwardOutcome(leadId);
+			mockMvc.perform(postLead("10.0.0.16", body)).andExpect(status().isCreated());
 		}
 	}
 
 	/**
-	 * TASK-015 review r1, IMPORTANTE 5: with {@code dcbo-backend} simulated as taking 1.5 s to
-	 * respond, {@code POST /api/leads} still returns 201 in well under 1 s — proving the forward
-	 * runs asynchronously, off the site visitor's own request thread, instead of blocking the
-	 * response on it. The lead is still eventually forwarded, verified once {@link
-	 * #awaitForwardOutcome(UUID)} confirms the background attempt finished.
+	 * TASK-001, AC D.6 (a): a {@code carroId} of a car that exists links the lead to that car, with
+	 * {@code status = ativo} and {@code origem = website}.
 	 *
 	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
 	@Test
-	void respondsBeforeTheSlowForwardingCallCompletesBecauseItRunsAsynchronously() throws Exception {
-		ResponseCreator delayedSuccess =
-				request -> {
-					try {
-						Thread.sleep(1500);
-					} catch (InterruptedException exception) {
-						Thread.currentThread().interrupt();
-					}
-					return withSuccess().createResponse(request);
-				};
-		dcboBackend.expect(requestTo("http://localhost:8080/internal/leads")).andRespond(delayedSuccess);
+	void linksTheLeadToAnExistingCar() throws Exception {
+		Car car = carRepository.saveAndFlush(aCar());
 
-		Instant start = Instant.now();
-		String responseBody =
-				mockMvc
-						.perform(
-								post("/api/leads")
-										.with(request -> {
-											request.setRemoteAddr("10.0.0.17");
-											return request;
-										})
-										.contentType(MediaType.APPLICATION_JSON)
-										.content("""
-												{"nome":"Assincrono Teste","telefone":"913456789"}
-												"""))
-						.andExpect(status().isCreated())
-						.andReturn()
-						.getResponse()
-						.getContentAsString();
-		long elapsedMs = Duration.between(start, Instant.now()).toMillis();
+		UUID leadId = createLead("10.0.0.18", """
+				{"nome":"Lead Com Carro","telefone":"913456789",
+				 "carroId":"%s","carroMarca":"BMW","carroModelo":"320d"}
+				""".formatted(car.getId()));
 
-		assertThat(elapsedMs).isLessThan(1000);
+		assertThat(jdbcTemplate.queryForMap("SELECT car_id, status, origem FROM leads WHERE id = ?", leadId))
+				.containsEntry("car_id", car.getId())
+				.containsEntry("status", "ativo")
+				.containsEntry("origem", "website");
+	}
 
-		UUID leadId = extractId(responseBody);
-		awaitForwardOutcome(leadId);
+	/**
+	 * TASK-001, AC D.6 (b): a {@code carroId} that matches no car still answers 201: the lead is saved
+	 * without car, with its snapshot, {@code origem = website} and {@code status = ativo}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void savesTheLeadWithoutCarWhenCarroIdMatchesNoCar() throws Exception {
+		UUID leadId = createLead("10.0.0.19", """
+				{"nome":"Carro Desconhecido","telefone":"913456789",
+				 "carroId":"%s","carroMarca":"Fiat","carroModelo":"Punto"}
+				""".formatted(UUID.randomUUID()));
+
 		Lead saved = leadRepository.findById(leadId).orElseThrow();
-		assertThat(saved.getForwardedAt()).isNotNull();
+		assertThat(saved.getCar()).isNull();
+		assertThat(saved.getCarroMarca()).isEqualTo("Fiat");
+		assertThat(saved.getCarroModelo()).isEqualTo("Punto");
+		assertThat(saved.getOrigem()).isEqualTo(LeadOrigin.WEBSITE);
+		assertThat(saved.getStatus()).isEqualTo(LeadStatus.ATIVO);
 	}
 
+	// ---------------------------------------------------------------------------------------------
+	// TASK-006, AC C.4: the lead and its notification, in one transaction
+	// ---------------------------------------------------------------------------------------------
+
 	/**
-	 * Extracts {@code id} from a {@code POST /api/leads} JSON response body.
+	 * A lead about a car: one row in {@code leads} ({@code status ativo}, {@code origem website}) and
+	 * one in {@code notifications} with the 6 fields of AC C.3.
 	 *
-	 * @param responseBody the raw JSON response body
-	 * @return the parsed id
+	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
-	private static UUID extractId(String responseBody) {
-		return UUID.fromString(responseBody.replaceAll(".*\"id\"\\s*:\\s*\"([^\"]+)\".*", "$1"));
+	@Test
+	void aLeadAboutACarCreatesExactlyOneLeadAndOneNotification() throws Exception {
+		Car car = carRepository.saveAndFlush(aCar());
+
+		UUID leadId = createLead("10.0.1.1", """
+				{"nome":"Ana","telefone":"913456789","carroId":"%s","carroMarca":"BMW","carroModelo":"X1"}
+				""".formatted(car.getId()));
+
+		assertThat(jdbcTemplate.queryForList("SELECT id, status, origem FROM leads"))
+				.containsExactly(Map.of("id", leadId, "status", "ativo", "origem", "website"));
+		assertThat(jdbcTemplate.queryForList(
+						"SELECT tipo, titulo, prioridade, read, lead_id, mensagem FROM notifications"))
+				.containsExactly(Map.of(
+						"tipo", "novo_lead",
+						"titulo", "Novo Lead",
+						"prioridade", "media",
+						"read", false,
+						"lead_id", leadId,
+						"mensagem", "Novo lead de Ana sobre BMW X1"));
 	}
 
 	/**
-	 * Polls the given lead until {@code LeadForwarder}'s asynchronous forwarding attempt (review
-	 * r1, IMPORTANTE 5) has recorded some outcome — {@code forwardedAt} set, or {@code
-	 * forwardAttempts} incremented — so a test can deterministically assert on that outcome, and so
-	 * this test class never finishes with a forward attempt still racing in the background against
-	 * whatever {@link #dcboBackend} the next test's {@link #setUp()} rebinds.
+	 * A general contact with {@code carroMarca: ""} (what {@code dc} sends) gets a message with no
+	 * {@code " sobre "} part at all; {@code dcbo-backend} wrote {@code "Novo lead de Ana sobre  "}.
 	 *
-	 * @param leadId the lead whose forwarding outcome to await
+	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
-	private void awaitForwardOutcome(UUID leadId) {
-		Instant deadline = Instant.now().plusSeconds(5);
-		while (Instant.now().isBefore(deadline)) {
-			Lead reloaded = leadRepository.findById(leadId).orElseThrow();
-			if (reloaded.getForwardedAt() != null || reloaded.getForwardAttempts() > 0) {
-				return;
-			}
-			sleepBriefly();
-		}
-		throw new AssertionError("Lead " + leadId + " forwarding outcome was not recorded within the timeout");
+	@Test
+	void aGeneralContactWithAnEmptyCarroMarcaGetsTheMessageWithoutCar() throws Exception {
+		createLead("10.0.1.2", """
+				{"nome":"Ana","telefone":"913456789","carroMarca":""}
+				""");
+
+		assertThat(jdbcTemplate.queryForList("SELECT mensagem FROM notifications", String.class))
+				.containsExactly("Novo lead de Ana");
 	}
 
 	/**
-	 * Sleeps for a short, fixed interval while polling in {@link #awaitForwardOutcome(UUID)},
-	 * restoring the interrupt flag instead of swallowing it if interrupted.
+	 * A brand without a model gives {@code "sobre BMW"} ({@code dcbo-backend} wrote {@code "sobre BMW
+	 * null"}), and a model without a brand {@code "sobre X1"}.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
 	 */
-	private static void sleepBriefly() {
+	@Test
+	void theNotificationMessageOnlyJoinsTheNonBlankCarParts() throws Exception {
+		createLead("10.0.1.3", """
+				{"nome":"Ana","telefone":"913456789","carroMarca":"BMW"}
+				""");
+		createLead("10.0.1.3", """
+				{"nome":"Rui","telefone":"913456789","carroMarca":"  ","carroModelo":"X1"}
+				""");
+
+		assertThat(jdbcTemplate.queryForList("SELECT mensagem FROM notifications", String.class))
+				.containsExactlyInAnyOrder("Novo lead de Ana sobre BMW", "Novo lead de Rui sobre X1");
+	}
+
+	/**
+	 * The notification uses the sanitized {@code nome}, the same value stored in the lead.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void theNotificationMessageUsesTheSanitizedNome() throws Exception {
+		UUID leadId = createLead("10.0.1.4", """
+				{"nome":"<b>Ana</b>","telefone":"913456789"}
+				""");
+
+		String storedNome = leadRepository.findById(leadId).orElseThrow().getNome();
+		assertThat(storedNome).doesNotContain("<b>");
+		assertThat(jdbcTemplate.queryForList("SELECT mensagem FROM notifications", String.class))
+				.containsExactly("Novo lead de " + storedNome);
+	}
+
+	/**
+	 * Atomicity: {@code createFromWebsite} inside a transaction that ends in rollback leaves zero leads
+	 * and zero notifications. Kills a {@code REQUIRES_NEW} on {@code createForNewLead} (the notification
+	 * would commit on its own, or fail on the foreign key of the lead not yet committed) and any
+	 * {@code @TransactionalEventListener}/{@code @Async} path.
+	 */
+	@Test
+	void aRollbackOfTheCallersTransactionLeavesNeitherTheLeadNorTheNotification() {
+		new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+			leadService.createFromWebsite(new LeadRequest("Ana", "913456789", null, null, null, "BMW", "X1"));
+			transaction.setRollbackOnly();
+		});
+
+		assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM leads", Long.class)).isZero();
+		assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM notifications", Long.class)).isZero();
+	}
+
+	/**
+	 * Cost: {@code POST /api/leads} with a car is exactly 3 statements: {@code lockKeyShare} of the
+	 * car, {@code INSERT} of the lead, {@code INSERT} of the notification. No token, so no {@code
+	 * ActiveUserInterceptor} query.
+	 *
+	 * @throws Exception propagated from {@link MockMvc#perform}
+	 */
+	@Test
+	void aLeadAboutACarCostsExactlyThreeStatements() throws Exception {
+		Car car = carRepository.saveAndFlush(aCar());
+		String body = """
+				{"nome":"Ana","telefone":"913456789","carroId":"%s","carroMarca":"BMW","carroModelo":"X1"}
+				""".formatted(car.getId());
+
+		Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+		statistics.setStatisticsEnabled(true);
+		statistics.clear();
+		long statements;
 		try {
-			Thread.sleep(50);
-		} catch (InterruptedException exception) {
-			Thread.currentThread().interrupt();
+			mockMvc.perform(postLead("10.0.1.5", body)).andExpect(status().isCreated());
+			statements = statistics.getPrepareStatementCount();
+		} finally {
+			statistics.setStatisticsEnabled(false);
 		}
+
+		assertThat(statements).isEqualTo(3);
+		assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM notifications", Long.class)).isEqualTo(1);
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Helpers
+	// ---------------------------------------------------------------------------------------------
+
+	private static Car aCar() {
+		return Car.builder()
+				.marca("BMW")
+				.modelo("320d")
+				.ano(2020)
+				.preco(new BigDecimal("25000.00"))
+				.km(50000)
+				.cor("Preto")
+				.combustivel("Diesel")
+				.transmissao("Manual")
+				.origem("Nacional")
+				.build();
+	}
+
+	private static MockHttpServletRequestBuilder postLead(String remoteAddr, String body) {
+		return post("/api/leads")
+				.with(request -> {
+					request.setRemoteAddr(remoteAddr);
+					return request;
+				})
+				.contentType(MediaType.APPLICATION_JSON)
+				.content(body);
+	}
+
+	private UUID createLead(String remoteAddr, String body) throws Exception {
+		String responseBody = mockMvc
+				.perform(postLead(remoteAddr, body))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.id").exists())
+				.andReturn()
+				.getResponse()
+				.getContentAsString();
+		return UUID.fromString(responseBody.replaceAll(".*\"id\"\\s*:\\s*\"([^\"]+)\".*", "$1"));
 	}
 }

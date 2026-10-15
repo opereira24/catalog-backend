@@ -6,8 +6,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
-import pt.diamondcars.catalogbackend.service.LeadForwardScheduler;
+import org.springframework.scheduling.config.ScheduledTask;
+import org.springframework.scheduling.config.ScheduledTaskHolder;
 import pt.diamondcars.catalogbackend.support.AbstractPostgresIntegrationTest;
+import pt.diamondcars.catalogbackend.web.RateLimitInterceptor;
 
 /**
  * Smoke test that verifies the Spring application context starts up successfully against a real,
@@ -21,23 +23,26 @@ class CatalogBackendApplicationTests extends AbstractPostgresIntegrationTest {
 	/**
 	 * Verifies that the full Spring application context loads without errors, with the datasource
 	 * wired to the Testcontainers-managed PostgreSQL instance instead of the placeholder configured
-	 * in {@code application.yml}.
+	 * in {@code application.yml}. Since TASK-006 neither {@code application.yml} nor this context
+	 * defines any property of the removed lead forwarding to {@code dcbo-backend}: starting at all
+	 * proves the service no longer needs them.
 	 */
 	@Test
 	void contextLoads() {
 	}
 
 	/**
-	 * TASK-015 review r1, IMPORTANTE 4: this test class declares no {@code
-	 * app.leads.forward.retry.enabled} property of its own — the property forced to {@code false}
-	 * on {@link AbstractPostgresIntegrationTest} is the only thing keeping {@link
-	 * LeadForwardScheduler} out of this context by default. Before that fix, this context (and
-	 * every other one sharing the same Postgres container/test classpath) started with the
-	 * scheduler active, free to fire immediately and attempt a real outbound HTTP call.
+	 * TASK-006 AC A.2: {@code @EnableScheduling} on {@link CatalogBackendApplication} stays after the
+	 * lead-forwarding scheduler is gone, because {@code RateLimitInterceptor#evictExpiredEntries} is
+	 * {@code @Scheduled} and is the only sweep of the rate limiter's per-IP map. Without the
+	 * annotation no scheduled-task holder exists and the map grows without bound; this test goes red.
+	 * A {@link ScheduledTask} prints as {@code <target class>.<method>}.
 	 */
 	@Test
-	void leadForwardSchedulerIsNotRegisteredByDefaultInTests() {
-		assertThat(applicationContext.getBeanNamesForType(LeadForwardScheduler.class)).isEmpty();
+	void theRateLimiterSweepIsAScheduledTask() {
+		assertThat(applicationContext.getBeansOfType(ScheduledTaskHolder.class).values())
+				.flatMap(ScheduledTaskHolder::getScheduledTasks)
+				.extracting(ScheduledTask::toString)
+				.contains(RateLimitInterceptor.class.getName() + ".evictExpiredEntries");
 	}
-
 }

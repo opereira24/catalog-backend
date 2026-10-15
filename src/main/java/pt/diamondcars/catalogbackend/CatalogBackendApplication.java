@@ -8,8 +8,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * Entry point for the {@code catalog-backend} Spring Boot application.
  *
  * <p>{@link EnableScheduling} activates the {@code @Scheduled} infrastructure {@code
- * pt.diamondcars.catalogbackend.service.LeadForwardScheduler} (TASK-015 requirement 7) relies on
- * for its periodic lead-forwarding retry.
+ * pt.diamondcars.catalogbackend.web.RateLimitInterceptor#evictExpiredEntries} relies on: without
+ * it the per-IP map of the {@code POST /api/leads} rate limiter is never swept and grows without
+ * bound (fixed by {@code CatalogBackendApplicationTests}).
  */
 @EnableScheduling
 @SpringBootApplication

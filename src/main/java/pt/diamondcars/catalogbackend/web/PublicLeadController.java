@@ -26,15 +26,15 @@ public class PublicLeadController {
 	/**
 	 * Creates the controller with its backing service.
 	 *
-	 * @param leadService the service implementing lead creation and forwarding
+	 * @param leadService the service implementing lead creation
 	 */
 	public PublicLeadController(LeadService leadService) {
 		this.leadService = leadService;
 	}
 
 	/**
-	 * Submits a new sales lead. Always persists it locally and returns 201, even when the
-	 * best-effort forward to {@code dcbo-backend} (requirement 6) fails.
+	 * Submits a new sales lead: persists it, with its back-office notification, and returns 201
+	 * (TASK-006: no call to any other service).
 	 *
 	 * @param request the validated payload
 	 * @return 201 with the created lead's id

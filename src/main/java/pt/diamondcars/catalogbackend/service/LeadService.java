@@ -1,59 +1,77 @@
 package pt.diamondcars.catalogbackend.service;
 
-import org.springframework.context.ApplicationEventPublisher;
+import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import pt.diamondcars.catalogbackend.domain.car.Car;
+import pt.diamondcars.catalogbackend.domain.car.CarRepository;
 import pt.diamondcars.catalogbackend.domain.lead.Lead;
 import pt.diamondcars.catalogbackend.domain.lead.LeadOrigin;
 import pt.diamondcars.catalogbackend.domain.lead.LeadRepository;
+import pt.diamondcars.catalogbackend.domain.lead.LeadStatus;
 import pt.diamondcars.catalogbackend.util.TextSanitizer;
 import pt.diamondcars.catalogbackend.web.dto.LeadRequest;
 import pt.diamondcars.catalogbackend.web.dto.LeadResponse;
 import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 
 /**
- * Backing service for {@code PublicLeadController} (TASK-015): persists every public-site lead
- * locally — the {@code leads} table doubles as an outbox (ASSUNÇÃO, {@code
- * backlog/tasks/TASK-015.md}, {@code ## Notas}: this is the only way to never lose a contact when
- * {@code dcbo-backend} is down) — then publishes {@link LeadCreatedEvent} so {@link
- * LeadForwarder} attempts the best-effort forward strictly after commit (requirement 6).
+ * Backing service for {@code PublicLeadController} (TASK-015): persists every public-site lead in
+ * the one {@code leads} table the back-office works, and, in the same transaction, the notification
+ * that tells the back-office about it (TASK-006, AC C.1). No call to any other service: before
+ * TASK-006 the lead was forwarded over HTTP to {@code dcbo-backend}, which was never deployed.
+ *
+ * <p>The back-office operations on leads live in {@link BackOfficeLeadService}; this class only
+ * serves the public site.
  */
 @Service
 public class LeadService {
 
 	private final LeadRepository leadRepository;
-	private final ApplicationEventPublisher eventPublisher;
+	private final CarRepository carRepository;
+	private final NotificationService notificationService;
 
 	/**
 	 * Creates the service with its dependencies.
 	 *
 	 * @param leadRepository the repository leads are persisted through
-	 * @param eventPublisher used to publish {@link LeadCreatedEvent} after every successful save
+	 * @param carRepository used to resolve a request's {@code carroId} to the car it refers to
+	 * @param notificationService creates the back-office notification of every new lead, in the
+	 *     same transaction
 	 */
-	public LeadService(LeadRepository leadRepository, ApplicationEventPublisher eventPublisher) {
+	public LeadService(
+			LeadRepository leadRepository, CarRepository carRepository, NotificationService notificationService) {
 		this.leadRepository = leadRepository;
-		this.eventPublisher = eventPublisher;
+		this.carRepository = carRepository;
+		this.notificationService = notificationService;
 	}
 
 	/**
 	 * Persists a lead submitted by the public site, sanitizing every free-text field (requirement
 	 * 3) and deriving {@link LeadOrigin} from whether a car is referenced (requirement 2): {@link
 	 * LeadOrigin#WEBSITE} when {@code carroId} is present, {@link LeadOrigin#WEBSITE_CONTACTO}
-	 * otherwise — the exact two values the public site's own forms already use.
+	 * otherwise — the exact two values the public site's own forms already use. The status is
+	 * always {@link LeadStatus#ATIVO}, what the site has always written, set explicitly rather than
+	 * left to the entity's builder default ({@link LeadStatus#CONTACTADO}). A {@code carroId} that
+	 * matches no car still yields 201 (see {@link #findCar(UUID)}).
 	 *
 	 * <p>Every length bound is checked <b>after</b> sanitizing (TASK-015 review r1, BLOQUEADOR 1):
-	 * checking before let a value grow past {@code dcbo-backend}'s own limit once HTML-entity
-	 * escaping expanded it (e.g. {@code /} becomes {@code &#x2F;}), so a lead accepted here with
-	 * 201 could still be silently lost when the forwarding call to {@code POST /internal/leads}
-	 * rejected it with 400. The bounds below are exactly {@code InternalLeadRequest}'s, confirmed
-	 * in {@code dcbo-backend}'s source, so a lead persisted here can never fail forwarding on
-	 * length/shape alone.
+	 * HTML-entity escaping expands a value (e.g. {@code /} becomes {@code &#x2F;}), and checking
+	 * before let a value through that no longer fits its bound once stored. The bounds are part of
+	 * the public contract and did not change with TASK-006.
+	 *
+	 * <p>The site's {@code mensagem} is stored in {@code leads.mensagem}, never in {@code notas}
+	 * (TASK-006 AC C.2, ASSUNÇÃO): {@code notas} belongs to the stand's staff and the back-office
+	 * {@code PUT} replaces it.
+	 *
+	 * <p>{@link NotificationService#createForNewLead(Lead)} runs in this same transaction
+	 * (propagation {@code REQUIRED}): a rollback after it leaves neither the lead nor the
+	 * notification. Exactly 3 statements with a car: {@code lockKeyShare}, {@code INSERT} of the
+	 * lead, {@code INSERT} of the notification ({@code PublicLeadControllerTest}).
 	 *
 	 * @param request the validated, public request payload
 	 * @return the created lead's id
 	 * @throws LeadValidationException when {@code nome}, {@code mensagem}, {@code carroMarca} or
-	 *     {@code carroModelo}, once sanitized, no longer fits the bound {@code dcbo-backend} also
-	 *     enforces
+	 *     {@code carroModelo}, once sanitized, no longer fits its bound
 	 */
 	@Transactional
 	public LeadResponse createFromWebsite(LeadRequest request) {
@@ -76,14 +94,41 @@ public class LeadService {
 						// free-text fields rather than because it can ever actually change the value.
 						.telefone(TextSanitizer.sanitize(request.telefone()))
 						.mensagem(mensagem)
-						.carId(request.carroId())
+						.car(findCar(request.carroId()))
 						.carroMarca(carroMarca)
 						.carroModelo(carroModelo)
+						.status(LeadStatus.ATIVO)
 						.origem(request.carroId() != null ? LeadOrigin.WEBSITE : LeadOrigin.WEBSITE_CONTACTO)
 						.build();
 		Lead saved = leadRepository.save(lead);
-		eventPublisher.publishEvent(new LeadCreatedEvent(saved.getId()));
+		notificationService.createForNewLead(saved);
 		return new LeadResponse(saved.getId());
+	}
+
+	/**
+	 * Resolves the car a lead is about, tolerating an id that matches no car (TASK-001).
+	 *
+	 * <p>{@code leads.car_id} is a foreign key since V2, so an unknown id can no longer be stored
+	 * as is. A visitor may still send one (a car deleted while its page was open, a stale link), and
+	 * the public contract never fails for that: the lead is saved without car, keeping the {@code
+	 * carroMarca}/{@code carroModelo} snapshot, and {@code origem} stays decided by the presence of
+	 * {@code carroId} in the request, not by whether the car exists.
+	 *
+	 * <p>The lookup takes {@code FOR KEY SHARE} on the car ({@link CarRepository#lockKeyShare},
+	 * TASK-010 AC C.8): since the back-office can delete cars, a car deleted between this lookup and
+	 * the {@code INSERT} of the lead made the insert fail on {@code leads_car_id_fkey} (409, lead
+	 * lost). With the lock, either the {@code DELETE} commits first and the lead is saved without car,
+	 * or the lead commits first and the {@code DELETE}'s {@code ON DELETE SET NULL} clears it. Then
+	 * {@code getReferenceById}: the lead only needs the id, no second {@code SELECT}.
+	 *
+	 * @param carroId the id sent by the public site, or {@code null} for a general contact
+	 * @return the matching car, or {@code null} when {@code carroId} is {@code null} or unknown
+	 */
+	private Car findCar(UUID carroId) {
+		if (carroId == null) {
+			return null;
+		}
+		return carRepository.lockKeyShare(carroId).map(carRepository::getReferenceById).orElse(null);
 	}
 
 	/**

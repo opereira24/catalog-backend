@@ -5,10 +5,12 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.core.PropertyReferenceException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.ErrorResponseException;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
@@ -21,9 +23,20 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import pt.diamondcars.catalogbackend.web.dto.ApiError;
+import pt.diamondcars.catalogbackend.web.exception.CarAlreadySoldException;
 import pt.diamondcars.catalogbackend.web.exception.CarNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.DuplicateAuthSubjectException;
+import pt.diamondcars.catalogbackend.web.exception.HighlightLimitExceededException;
+import pt.diamondcars.catalogbackend.web.exception.InactiveUserException;
+import pt.diamondcars.catalogbackend.web.exception.InvalidReferenceException;
+import pt.diamondcars.catalogbackend.web.exception.InvalidTransactionDateException;
 import pt.diamondcars.catalogbackend.web.exception.LeadValidationException;
 import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
+import pt.diamondcars.catalogbackend.web.exception.ResourceInUseException;
+import pt.diamondcars.catalogbackend.web.exception.ResourceNotFoundException;
+import pt.diamondcars.catalogbackend.web.exception.SelfDeactivationException;
+import pt.diamondcars.catalogbackend.web.exception.SelfDeletionException;
+import pt.diamondcars.catalogbackend.web.exception.UnknownSortPropertyException;
 
 /**
  * Central exception-to-HTTP-response translation for the whole API, per TASK-014 requirement 7.
@@ -127,6 +140,191 @@ public class ApiExceptionHandler {
 	@ExceptionHandler(LeadValidationException.class)
 	public ResponseEntity<ApiError> handleLeadValidation(LeadValidationException exception, HttpServletRequest request) {
 		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link InactiveUserException} (the authenticated caller's {@code app_users} profile has
+	 * {@code active = false}, TASK-002 requirement 5) to 403. Thrown by {@code
+	 * ActiveUserInterceptor} before the controller method, so before any {@code @PreAuthorize}.
+	 *
+	 * @param exception the exception thrown by the interceptor
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 403 response body
+	 */
+	@ExceptionHandler(InactiveUserException.class)
+	public ResponseEntity<ApiError> handleInactiveUser(InactiveUserException exception, HttpServletRequest request) {
+		return respond(HttpStatus.FORBIDDEN, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps Spring Security's {@link AccessDeniedException} (raised by {@code @PreAuthorize} when an
+	 * authenticated caller lacks the required role) to 403 in the {@link ApiError} envelope.
+	 * Required, not cosmetic: without it {@link #handleUnexpected(Exception, HttpServletRequest)}
+	 * would turn every role refusal into a 500 (TASK-002, AC D.6).
+	 *
+	 * @param exception the exception {@code @PreAuthorize} raises when denying access
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 403 response body
+	 */
+	@ExceptionHandler(AccessDeniedException.class)
+	public ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException exception, HttpServletRequest request) {
+		return respond(HttpStatus.FORBIDDEN, "Autenticado, mas sem a role exigida para esta operacao", request);
+	}
+
+	/**
+	 * Maps {@link ResourceNotFoundException} (a back-office resource that does not exist, e.g. {@code
+	 * Carro nao encontrado: <id>} or {@code Parceiro nao encontrado: <id>}, TASK-003) to 404 with the
+	 * exception's message.
+	 *
+	 * @param exception the exception thrown by a back-office service
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 404 response body
+	 */
+	@ExceptionHandler(ResourceNotFoundException.class)
+	public ResponseEntity<ApiError> handleResourceNotFound(
+			ResourceNotFoundException exception, HttpServletRequest request) {
+		return respond(HttpStatus.NOT_FOUND, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link HighlightLimitExceededException} (featuring one more car would exceed the 8-car
+	 * limit, TASK-003 AC E.1) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code BackOfficeCarService}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(HighlightLimitExceededException.class)
+	public ResponseEntity<ApiError> handleHighlightLimitExceeded(
+			HighlightLimitExceededException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link ResourceInUseException} (deleting a client/partner refused because a car still
+	 * references it, TASK-004) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code ClientService}/{@code PartnerService}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(ResourceInUseException.class)
+	public ResponseEntity<ApiError> handleResourceInUse(
+			ResourceInUseException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link DuplicateAuthSubjectException} (creating a back-office profile for an {@code
+	 * authSubject} that already has one, TASK-007 AC C.2) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code AppUserService#create}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(DuplicateAuthSubjectException.class)
+	public ResponseEntity<ApiError> handleDuplicateAuthSubject(
+			DuplicateAuthSubjectException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link SelfDeactivationException} (an admin deactivating their own profile, TASK-007 AC
+	 * C.4) to 409 with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code AppUserService#setActive}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(SelfDeactivationException.class)
+	public ResponseEntity<ApiError> handleSelfDeactivation(
+			SelfDeactivationException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link SelfDeletionException} (an admin deleting their own profile, TASK-007 AC C.5) to 409
+	 * with the exception's message.
+	 *
+	 * @param exception the exception thrown by {@code AppUserService#delete}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(SelfDeletionException.class)
+	public ResponseEntity<ApiError> handleSelfDeletion(SelfDeletionException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link CarAlreadySoldException} (selling a car that is already sold, TASK-010 AC B.6) to
+	 * 409 with the exception's message ({@code Carro ja vendido: <id>}).
+	 *
+	 * @param exception the exception thrown by {@code BackOfficeCarService#sell}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 409 response body
+	 */
+	@ExceptionHandler(CarAlreadySoldException.class)
+	public ResponseEntity<ApiError> handleCarAlreadySold(
+			CarAlreadySoldException exception, HttpServletRequest request) {
+		return respond(HttpStatus.CONFLICT, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link UnknownSortPropertyException} (a {@code sort} property outside a back-office
+	 * listing's allow-list, TASK-003 AC D.3) to 400.
+	 *
+	 * @param exception the exception thrown before the listing query runs
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(UnknownSortPropertyException.class)
+	public ResponseEntity<ApiError> handleUnknownSortProperty(
+			UnknownSortPropertyException exception, HttpServletRequest request) {
+		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link InvalidTransactionDateException} (a transaction {@code data} in neither accepted
+	 * format, or outside {@code [0001-01-01, 9999-12-31]}, TASK-005 AC B.4) to 400.
+	 *
+	 * @param exception the exception {@code TransactionRequest#resolveData()} throws
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(InvalidTransactionDateException.class)
+	public ResponseEntity<ApiError> handleInvalidTransactionDate(
+			InvalidTransactionDateException exception, HttpServletRequest request) {
+		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps {@link InvalidReferenceException} (a body field naming a resource that does not exist,
+	 * e.g. {@code carroId: carro nao encontrado: <id>}, TASK-005 AC B.4) to 400.
+	 *
+	 * @param exception the exception thrown by {@code TransactionService#create}
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(InvalidReferenceException.class)
+	public ResponseEntity<ApiError> handleInvalidReference(
+			InvalidReferenceException exception, HttpServletRequest request) {
+		return respond(HttpStatus.BAD_REQUEST, exception.getMessage(), request);
+	}
+
+	/**
+	 * Maps Spring Data's {@link PropertyReferenceException} (a {@code sort} property the entity does
+	 * not have) to 400 with the same message as {@link UnknownSortPropertyException}, instead of a
+	 * 500. Safety net for a {@code Pageable} listing without its own allow-list (TASK-003 AC H).
+	 *
+	 * @param exception the exception Spring Data raises when resolving the sort property
+	 * @param request the failed request, used to report {@link ApiError#path()}
+	 * @return the 400 response body
+	 */
+	@ExceptionHandler(PropertyReferenceException.class)
+	public ResponseEntity<ApiError> handlePropertyReference(
+			PropertyReferenceException exception, HttpServletRequest request) {
+		return respond(
+				HttpStatus.BAD_REQUEST, "Campo de ordenacao desconhecido: " + exception.getPropertyName(), request);
 	}
 
 	/**
