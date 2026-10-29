@@ -18,7 +18,7 @@ import pt.diamondcars.catalogbackend.web.exception.RateLimitExceededException;
  * ({@code app.leads.rate-limit.max-requests + 1})-th submission from the same IP within {@code
  * app.leads.rate-limit.window-minutes} is rejected with {@link RateLimitExceededException},
  * mapped to 429 by {@code ApiExceptionHandler}. Registered only for {@code /api/leads} by {@link
- * pt.diamondcars.catalogbackend.config.CorsConfig#addInterceptors}.
+ * pt.diamondcars.catalogbackend.config.WebConfig#addInterceptors}.
  *
  * <p><b>TASK-015 review r1, BLOQUEADOR 2 / review r2, IMPORTANTE 1</b>: the "per IP" key is
  * resolved by {@link #resolveClientIp(HttpServletRequest)} from {@code X-Forwarded-For} instead of

@@ -1,67 +1,53 @@
 package pt.diamondcars.catalogbackend.config;
 
+import java.time.Duration;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.web.servlet.config.annotation.CorsRegistry;
-import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
-import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
-import pt.diamondcars.catalogbackend.web.RateLimitInterceptor;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 /**
- * Servlet-level web configuration shared by the whole public API: CORS policy (TASK-014
- * requirement 6) and, since TASK-015, registration of {@link RateLimitInterceptor} for {@code
- * POST /api/leads}.
+ * The single CORS policy of the application (TASK-002, AC D.5), applied by {@link SecurityConfig}
+ * through {@code http.cors(...)}. There is deliberately no Spring MVC {@code addCorsMappings}
+ * any more: two policies would drift, and only the one inside the security filter chain answers a
+ * preflight (which never carries {@code Authorization}) before authentication rejects it.
  *
- * <p>CORS allows the configured origin(s) (the {@code dc} site) to call {@code /api/**} with
- * {@code GET}/{@code POST}/{@code OPTIONS}, and nothing else — {@code /internal/**} (TASK-016) is
- * never a browser-called endpoint and is deliberately left out of this mapping. Never registers a
- * wildcard origin combined with credentials: this API uses no cookies/session, only explicit
- * origins from {@code app.cors.allowed-origins} (comma-separated, default placeholder {@code
- * http://localhost:3000}).
+ * <p>Registered on {@code /api/**} only, as before (the actuator is never called from a browser).
+ * Origins come from {@code app.cors.allowed-origins} ({@code CORS_ALLOWED_ORIGINS}, comma-separated:
+ * the {@code dc} site and the {@code dcbo} back-office), never {@code *}, and credentials are never
+ * allowed (there are no cookies, only the bearer token). Methods cover the public site ({@code GET},
+ * {@code POST}) and the back-office ({@code PUT}, {@code PATCH}, {@code DELETE}); headers cover
+ * {@code Content-Type} (the only one the {@code dc} sends) and {@code Authorization}. The preflight
+ * is cached by the browser for 30 minutes, the value Spring MVC used implicitly before.
  */
 @Configuration
-public class CorsConfig implements WebMvcConfigurer {
+public class CorsConfig {
 
-	private final List<String> allowedOrigins;
-	private final RateLimitInterceptor rateLimitInterceptor;
-
-	/**
-	 * Creates the configuration with the allowed origins resolved from {@code
-	 * app.cors.allowed-origins} and the rate limiter TASK-015 adds for {@code POST /api/leads}.
-	 *
-	 * @param allowedOrigins explicit origins allowed to call {@code /api/**}
-	 * @param rateLimitInterceptor the interceptor registered below for {@code /api/leads}
-	 */
-	public CorsConfig(
-			@Value("${app.cors.allowed-origins}") List<String> allowedOrigins,
-			RateLimitInterceptor rateLimitInterceptor) {
-		this.allowedOrigins = allowedOrigins;
-		this.rateLimitInterceptor = rateLimitInterceptor;
-	}
+	private static final List<String> ALLOWED_METHODS = List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS");
+	private static final List<String> ALLOWED_HEADERS = List.of("Authorization", "Content-Type");
+	private static final Duration PREFLIGHT_MAX_AGE = Duration.ofMinutes(30);
 
 	/**
-	 * Restricts the CORS mapping to {@code /api/**}, leaving {@code /internal/**} and {@code
-	 * /actuator/**} with no CORS headers at all (they are never called from a browser).
+	 * Declares the CORS policy described in the class Javadoc.
 	 *
-	 * @param registry the registry to add the mapping to
+	 * @param allowedOrigins explicit origins allowed to call {@code /api/**}, from {@code
+	 *     app.cors.allowed-origins}
+	 * @return the configuration source {@link SecurityConfig} plugs into the filter chain
 	 */
-	@Override
-	public void addCorsMappings(CorsRegistry registry) {
-		registry
-				.addMapping("/api/**")
-				.allowedOrigins(allowedOrigins.toArray(new String[0]))
-				.allowedMethods("GET", "POST", "OPTIONS");
-	}
+	@Bean
+	public CorsConfigurationSource corsConfigurationSource(
+			@Value("${app.cors.allowed-origins}") List<String> allowedOrigins) {
+		CorsConfiguration configuration = new CorsConfiguration();
+		configuration.setAllowedOrigins(allowedOrigins);
+		configuration.setAllowedMethods(ALLOWED_METHODS);
+		configuration.setAllowedHeaders(ALLOWED_HEADERS);
+		configuration.setMaxAge(PREFLIGHT_MAX_AGE);
 
-	/**
-	 * Registers {@link RateLimitInterceptor} for {@code /api/leads} only (TASK-015 requirement 4)
-	 * — every other endpoint, including the rest of {@code /api/**}, is unaffected.
-	 *
-	 * @param registry the registry to add the interceptor to
-	 */
-	@Override
-	public void addInterceptors(InterceptorRegistry registry) {
-		registry.addInterceptor(rateLimitInterceptor).addPathPatterns("/api/leads");
+		UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+		source.registerCorsConfiguration("/api/**", configuration);
+		return source;
 	}
 }

@@ -1,13 +1,13 @@
 package pt.diamondcars.catalogbackend.web.exception;
 
 /**
- * Thrown by {@code LeadService} when a lead field, once sanitized, no longer fits the length
- * bound that {@code POST /internal/leads} of {@code dcbo-backend} also enforces — mapped to 400
+ * Thrown by {@code LeadService} when a lead field, once sanitized, no longer fits its length bound
+ * — mapped to 400
  * by {@code pt.diamondcars.catalogbackend.web.ApiExceptionHandler} (TASK-015 review r1, BLOQUEADOR
  * 1). Checking the bound after sanitizing, instead of on the raw {@code LeadRequest} field, is
  * deliberate: HTML-entity escaping can grow a value past a limit it satisfied before escaping
  * (e.g. every {@code /} becomes the six characters {@code &#x2F;}), and it is the sanitized value
- * that is actually persisted and forwarded.
+ * that is actually persisted.
  */
 public class LeadValidationException extends RuntimeException {
 
